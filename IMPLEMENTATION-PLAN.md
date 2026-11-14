@@ -9,7 +9,7 @@
 - [x] 根 Docker Compose 改为构建并运行单个 TrustForge 应用镜像，PostgreSQL 作为同一部署栈中的持久化依赖；不再拉取独立 Technitium 镜像。
 - [x] Docker 启动前应用 PostgreSQL EF migrations；DNS 配置、DNS 日志和数据库分别持久化。
 - [x] 根 README 和部署手册改为 TrustForge 产品入口。
-- [ ] 在 Linux Docker 环境中实际构建并启动整套 Compose，验证 DNS 53/udp、53/tcp，DNS 管理端口和 TrustForge API/数据库健康状态。
+- [x] 在 Docker Desktop Linux 容器环境构建并启动根 Compose；临时映射 API、DNS UDP/TCP 和管理 UI 端口，验证 PostgreSQL readiness、API health、DNS UDP/TCP 查询和 DNS UI。
 - [ ] DNS 管理 UI 仍使用其自己的 Technitium 登录；统一登录、入口/反向代理和统一导航属于后续产品工作。
 
 目录约定：开发只打开根目录的 `TrustForge.sln`；部署只使用根目录 `docker-compose.yml` 中的 TrustForge 应用镜像，不再单独部署 Technitium DNS Server。
@@ -80,9 +80,9 @@
 - [x] 相同作用域幂等键返回同一任务；实现从 PostgreSQL 读取任务状态/历史。
 - [x] 写接口实施 JWT 角色授权；独立持久化的审计事件表尚未进入本阶段。
 - [x] 本机 API 使用 PostgreSQL 启动，`/health/live` 与 `/health/ready` 返回 200；匿名 `POST /api/v1/services` 返回 401。
-- [ ] 在实际 PostgreSQL 和 OIDC issuer 环境中运行 API 并验证服务登记、任务创建、权限拒绝和状态查询。
+- [x] 在实际 PostgreSQL 17 和 Keycloak 26.8.2 开发 issuer 环境中验证 API：匿名写入 401；PlatformAdmin 服务登记 201、手动任务 202、查询 200；幂等重放返回同一任务；无 TrustForge 角色的已认证用户读取被拒绝为 403；任务 `requestedBy` 与 OIDC `sub` 相同。
 
-阶段 2 当前实现状态：API 宿主、Linux 服务登记模型、手动任务创建/查询 API、JWT/RBAC 和本地 Keycloak/PostgreSQL 开发 Compose 配置已实现；整个解决方案编译通过。API 已在 PostgreSQL 上运行并验证 readiness 与匿名拒绝；Keycloak 尚未启动，因此尚未用真实 issuer/token 验证角色授权后的服务登记、任务创建与查询。持久层已通过实际 PostgreSQL smoke run 验证。
+阶段 2 当前实现状态：API 宿主、Linux 服务登记模型、手动任务创建/查询 API、JWT/RBAC 和本地 Keycloak/PostgreSQL 开发 Compose 配置已实现。Keycloak 返回的 access token 已验证包含 issuer、`sub`、`trustforge-api` audience 和 realm roles；API 通过真实签名校验，并完成服务登记、任务创建、幂等重放、任务读取以及无角色拒绝验证。手动任务处于 `Queued/version 0` 时尚无状态迁移行，首次 Worker 转换后才产生历史记录。
 
 ## 阶段 3：可靠任务 Worker 与端口适配器
 
@@ -153,4 +153,4 @@
 
 ## 当前下一步
 
-当前产品合并的代码、统一解决方案和 Docker 部署入口已完成；下一步在 Linux Docker 环境构建/启动整套 TrustForge Compose，确认 API、DNS 与 PostgreSQL 同栈运行，然后启动本地 Keycloak 开发 realm（`TrustForge.Api/README.md`），配置 loopback issuer/audience，验证授权 API；随后实现持久化 Worker 与 PostgreSQL 任务领取/恢复，再接 Smallstep ACME、Technitium DNS-01 和 SSH。
+TrustForge 统一解决方案、合并应用镜像和本地 Keycloak/OIDC API 验证已完成。下一步进入阶段 3：实现 PostgreSQL 可恢复任务 Worker 与多实例安全领取，再接 Smallstep ACME、Technitium DNS-01 和 SSH。

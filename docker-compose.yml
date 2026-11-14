@@ -20,8 +20,8 @@ services:
     ports:
       - "${TRUSTFORGE_API_PORT:-5000}:5000/tcp"
       - "${TRUSTFORGE_DNS_UI_BIND:-127.0.0.1}:${TRUSTFORGE_DNS_UI_PORT:-5380}:5380/tcp"
-      - "53:53/udp"
-      - "53:53/tcp"
+      - "${TRUSTFORGE_DNS_PORT:-53}:53/udp"
+      - "${TRUSTFORGE_DNS_PORT:-53}:53/tcp"
       # Optional DNS encryption and DHCP ports; publish only when configured and required.
       # - "853:853/udp"
       # - "853:853/tcp"

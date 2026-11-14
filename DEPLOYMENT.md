@@ -22,7 +22,7 @@ The container applies checked-in PostgreSQL migrations before starting the API a
 ## Endpoints
 
 - TrustForge API: `http://<host>:5000`, normally placed behind an HTTPS reverse proxy.
-- DNS service: host TCP/UDP port `53`.
+- DNS service: host TCP/UDP port `53` by default. Set `TRUSTFORGE_DNS_PORT` when the host requires a different port.
 - Technitium DNS administration UI: `http://127.0.0.1:5380` by default. Use an SSH tunnel or set `TRUSTFORGE_DNS_UI_BIND` to an explicitly trusted management interface.
 - PostgreSQL is reachable only on the Compose network; its port is not published on the host.
 

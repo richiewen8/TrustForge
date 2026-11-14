@@ -27,6 +27,7 @@ COPY --from=build /out/publish/ ./
 ENV ASPNETCORE_URLS=http://+:5000 \
     DnsServer__Enabled=true \
     DnsServer__ConfigDirectory=/etc/trustforge/dns \
+    DNS_SERVER_WEB_SERVICE_LOCAL_ADDRESSES=0.0.0.0 \
     DNS_SERVER_LOG_FOLDER_PATH=/var/log/technitium/dns
 
 EXPOSE 5000/tcp 5380/tcp 53/udp 53/tcp 853/udp 853/tcp 443/udp 443/tcp 80/tcp 8053/tcp 67/udp
