@@ -144,6 +144,11 @@ TrustForge 以 Technitium DNS Server 为 DNS 基座，逐步建设面向企业�
 ## 技术决策建议
 
 - 先沿用仓库现有 .NET 技术栈，TrustForge 后端与 DNS Server 通过清晰项目边界隔离；控制台可先采用现有 Web 技术栈。
+- **持久化数据库采用 PostgreSQL。** TrustForge 的服务、CA/证书元数据、任务状态/历史、审计与配置引用使用 PostgreSQL 持久化；通过迁移管理 schema，不以 SQLite 作为首版或临时生产存储。
+- 建议采用 Npgsql + EF Core migrations；状态迁移、幂等键唯一约束和乐观并发更新必须由数据库事务/约束保证。Worker 领取任务使用数据库可恢复的租约/锁，避免进程重启后丢失任务或多 Worker 重复执行。
+- **CA 签发采用 Smallstep `step-ca` + 标准 ACME。** TrustForge 实现 ACME 客户端/编排适配器，不依赖 `step-ca` 私有签发接口；证书签发、续期等尽量沿用协议标准和互操作生态。
+- 内网 DNS 名称首选 ACME DNS-01：TrustForge 通过最小权限 Technitium DNS 适配器创建、验证并清理 `_acme-challenge` TXT 记录；HTTP-01 等挑战类型可作为后续按网络条件增加的适配器。
+- CA ACME 端点、ACME 账户凭据/密钥、EAB 凭据（若部署策略要求）均通过秘密管理后端引用；ACME 账户密钥与目标服务私钥分离。step-ca 的 ACME Provisioner 不提供吊销能力，吊销应后续通过单独的受控 CA 管理通道实现，不假设 ACME 客户端可完成吊销。
 - 为 DNS 操作实现独立适配器接口，避免业务代码依赖 Technitium 内部实现细节。
 - CA 签名抽象提供 `Sign`、`GetPublicCertificate`、`GetCapabilities` 等窄接口，密钥引用与密码学操作分离。
 - 所有签发与 DNS 变更采用可追踪任务 ID、幂等键、结构化结果和审计事件。
@@ -157,4 +162,77 @@ TrustForge 以 Technitium DNS Server 为 DNS 基座，逐步建设面向企业�
 4. 设计 CA/证书状态机、RBAC 矩阵、审计事件和密钥提供方契约。
 5. 定义 Technitium API 适配契约与最小权限 DNS-01 流程。
 6. 以威胁模型和运维恢复方案评审 MVP，再进入签发功能实现。
+
+## MVP 实现规格：单台 Linux 服务证书手动签发与部署
+
+### 目标与范围
+
+交付一条可端到端运行的流程：管理员在 TrustForge 登记一台 Linux 测试主机和一个服务，手动触发证书签发；服务端本机生成并保管私钥，TrustForge 作为 ACME 客户端向 Smallstep `step-ca` 创建订单，通过 Technitium DNS 完成 DNS-01 验证并获取证书，再通过 SSH/SFTP 部署证书链，执行受控的服务重载与健康检查；部署失败时恢复之前的证书版本。首版只支持一个已配置的 CA/ACME 账户、证书模板及 PEM 文件目标，不实现定时调度、公有云、Windows、通用远程 Shell 或多主机编排。
+
+### 参与组件
+
+- **TrustForge API/Worker**：身份授权、参数校验、任务状态机、CSR 签发、审计与通知。
+- **CA 签名提供方**：接收 CSR 与证书配置并返回签发证书；CA 私钥不离开签名边界。
+- **SSH Connector**：校验主机密钥，使用秘密管理后端提供的 SSH 凭据，通过 SSH/SFTP 执行限定操作和传输文件。
+- **Linux 目标主机**：运行 OpenSSH、OpenSSL，以及 root 所有、不可由服务账号修改的 TrustForge 安装助手；服务私钥在此生成。
+- **目标服务**：使用配置的证书路径，并提供受控的重载和健康检查方式。
+
+### Linux 主机前置配置
+
+- 创建专用 `trustforge` 系统账号，通过 SSH 公钥认证登录，禁止密码登录、交互式 Shell、端口转发、Agent 转发和伪终端；固定并预先登记 SSH 主机公钥指纹。
+- 安装 TrustForge root 所有、不可由 `trustforge` 用户修改的安装助手，例如 `/usr/local/sbin/trustforge-certctl`。SSH Connector 只允许调用该助手的固定子命令，不允许接受任意命令、Shell 片段或 sudo 参数。
+- 安装助手需校验服务 ID 与预先配置的证书路径白名单；创建私钥/CSR、设置文件属主和权限、执行原子切换/回滚，并只执行预先登记的服务 reload 与 health-check 配置。
+- 私钥建议权限 `0600`，证书/链权限按目标服务读取需求设置；私钥不通过 SFTP 传回 TrustForge，不进入日志、数据库或审计事件。
+- 上线前以目标服务账号验证证书文件可读、私钥与证书匹配，并确保 SSH 账号不能借助手配置执行白名单外操作。
+
+### 手动签发与部署时序
+
+1. 管理员创建 `ManagedService`，填写主机地址/端口、SSH 主机密钥指纹、凭据引用、服务名称、证书模板、SAN、证书/链/私钥路径、属主/权限、安装助手标识、reload 与健康检查配置；敏感凭据只存秘密管理系统。
+2. 管理员点击“签发并部署”。API 校验 RBAC、服务启用状态、CA/ACME 账户/模板状态、SAN 约束、续期/有效期策略、目标路径和 SSH 配置，然后创建唯一 `CertificateJob` 与审计事件并返回任务 ID。
+3. Worker 取得该服务的互斥锁，任务进入 `Connecting`。连接前核对已登记的主机密钥指纹；任何变化均中止并要求管理员更新信任配置。
+4. Worker 请求安装助手为本次任务生成密钥和 CSR。私钥在目标机受限临时目录生成，权限立即设为 `0600`；CSR 经 SFTP 取回并在服务端校验公钥算法、SAN 与服务申请完全一致。私钥不得离开目标机。
+5. Worker 使用 TrustForge 管理的 ACME 账户向 `step-ca` 创建订单，校验订单标识符与已批准 SAN 完全相符；按 DNS-01 授权流程通过 Technitium 创建 `_acme-challenge` TXT 记录，等待 ACME authorization 有效。Worker 使用 CSR 完成 ACME order finalize，下载证书并校验链、SAN、EKU/KeyUsage、有效期和模板约束；生成仅含证书及中间链的部署包。挑战记录在成功或失败清理流程中移除，并记录 DNS 变更审计。
+6. Worker 通过 SFTP 将证书链写入安装助手管理的任务暂存区。助手验证任务 ID、文件摘要、证书与目标私钥匹配、证书链及目标路径白名单；保留当前部署版本，准备新的证书文件并设置属主/权限。
+7. 安装助手将新证书文件原子切换到生效路径，执行固定的服务重载动作。Worker/助手运行健康检查（命令退出状态及可配置 TLS 探测），确认实际服务端证书指纹与本次签发证书一致。
+8. 检查通过后任务进入 `Succeeded`，新证书关联服务并设为当前部署；旧证书仍保留在库存和受限回滚槽位，审计记录保存其版本引用。按保留策略清理过期暂存数据，但不得清理当前版本和回滚版本。
+9. 任一步失败时记录失败阶段和安全的错误摘要。若已经切换文件，安装助手恢复上一版本并重新加载服务，再验证旧证书健康；任务进入 `FailedRolledBack`。如果回滚或验证也失败，进入 `RollbackFailed` 并立即告警，保留现场文件和日志供管理员处理，不继续自动破坏性重试。
+10. Worker 在任务结束时释放互斥锁；崩溃恢复时根据持久化阶段和远端任务标记进行对账，禁止盲目重复签发或切换。任务重试必须由管理员显式发起新任务，或经幂等检查确认原阶段可安全重入。
+
+### 任务状态
+
+`Queued` → `Connecting` → `GeneratingCsr` → `CreatingOrder` → `AwaitingChallenge` → `Signing`（ACME order finalize/下载）→ `Staging` → `Activating` → `Verifying` → `Succeeded`。
+
+失败终态：`Failed`（尚未改变线上部署）、`FailedRolledBack`（已切换后成功回滚）、`RollbackFailed`（回滚/回滚后验证失败）、`Cancelled`（仅允许在激活前取消）。每次状态变更记录任务 ID、服务 ID、操作者/触发来源、时间、证书序列号/指纹（签发后）、阶段和脱敏错误摘要。禁止记录私钥、SSH 私钥、秘密值或完整环境变量。
+
+### 数据/API 草案
+
+- `ManagedService`：`id`、`name`、`enabled`、`host`、`port`、`hostKeyFingerprint`、`sshCredentialRef`、`profileId`、`sans`、`keyAlgorithm`、`certificatePath`、`chainPath`、`privateKeyPath`、`owner/group/mode`、`remoteHelperId`、`reloadActionId`、`healthCheckId`、`currentCertificateId`。
+- `CertificateJob`：`id`、`serviceId`、`requestedBy`、`trigger`（`Manual`）、`state`、`idempotencyKey`、`certificateId`、`startedAt`、`finishedAt`、`failureStage`、`failureSummary`、`rollbackState`。
+- `DeploymentVersion`：`id`、`serviceId`、`certificateId`、`fingerprint`、远端版本槽位、部署时间、健康状态；不得包含私钥内容。
+- API 建议：`POST /api/v1/services`、`GET /api/v1/services/{id}`、`POST /api/v1/services/{id}/certificate-jobs`、`GET /api/v1/certificate-jobs/{id}`、`POST /api/v1/certificate-jobs/{id}/cancel`（仅激活前）。所有写请求鉴权并写审计；签发部署采用异步任务响应。
+
+### 首版权限
+
+- `PlatformAdmin`：管理 SSH 连接器、秘密引用、CA 与模板。
+- `CertificateOperator`：登记/修改服务并发起手动签发部署。
+- `Auditor`：只读查看服务、证书、任务和审计。
+- Worker 使用独立服务身份，只能读取目标服务引用的凭据、按服务策略申请签发，并在登记主机上调用受限助手。
+
+### 验收条件
+
+1. 未登记或指纹不匹配的 SSH 主机无法执行任何远程操作。
+2. 证书 SAN、算法、有效期不符合模板时，在部署前拒绝签发或拒绝继续部署，并留下可审计原因。
+3. 服务私钥只在目标 Linux 主机生成，权限符合配置；TrustForge 数据库、日志和审计中均不出现私钥或 SSH 凭据。
+4. 手动任务可从 UI/API 跟踪到终态，且重复提交/Worker 重启不会造成并发重复部署。
+5. 成功时服务实际呈现的新证书指纹与任务证书一致，原子切换期间不会出现半写入文件。
+6. 在重载失败、健康检查失败、SSH 中断等场景中，系统按切换阶段正确保留旧证书或执行回滚；回滚失败会告警并保留现场。
+7. SSH 账号不能执行白名单之外的命令或写入登记路径之外的位置；所有签发、部署、回滚操作有操作者、目标和结果审计。
+
+### 建议实现顺序
+
+1. 实现实体、状态机、RBAC、审计和异步任务持久化（先用模拟 SSH/CA 适配器贯通流程）。
+2. 实现 CA CSR 签发适配器及证书链校验。
+3. 实现 SSH 主机密钥校验、秘密凭据引用、SFTP 和受限安装助手协议。
+4. 实现 Linux 安装助手：生成密钥/CSR、暂存、权限设置、原子激活、健康检查和回滚。
+5. 增加单台隔离 Linux 测试机的端到端验收，再开放管理员手动操作。
 
