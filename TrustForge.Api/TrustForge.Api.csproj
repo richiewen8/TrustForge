@@ -6,10 +6,12 @@
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <RootNamespace>TrustForge.Api</RootNamespace>
-    <AssemblyName>TrustForge.Api</AssemblyName>
+    <AssemblyName>TrustForge</AssemblyName>
+    <Product>TrustForge</Product>
   </PropertyGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\DnsServerCore\DnsServerCore.csproj" />
     <ProjectReference Include="..\TrustForge.Core\TrustForge.Core.csproj" />
     <ProjectReference Include="..\TrustForge.Persistence\TrustForge.Persistence.csproj" />
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.15" />

@@ -6,6 +6,7 @@ using Microsoft.IdentityModel.Tokens;
 using TrustForge.Core.CertificateJobs;
 using TrustForge.Core.ManagedServices;
 using TrustForge.Persistence;
+using TrustForge.Api;
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 string? connectionString = builder.Configuration.GetConnectionString("TrustForge");
@@ -15,6 +16,7 @@ if (string.IsNullOrWhiteSpace(connectionString))
 builder.Services.AddTrustForgePersistence(connectionString);
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddScoped<CertificateJobCoordinator>();
+builder.Services.AddHostedService<DnsServerHostedService>();
 
 if (args.Contains("--migrate", StringComparer.Ordinal))
 {

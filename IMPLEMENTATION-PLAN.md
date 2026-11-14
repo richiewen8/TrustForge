@@ -2,6 +2,18 @@
 
 本文是 TrustForge 的执行清单。每个阶段完成后更新状态、交付物和未决项；实现细节改变时同步更新本文件与 `TRUSTFORGE-ARCHITECTURE.md`。
 
+## 产品合并：统一 TrustForge 构建与部署
+
+- [x] 将 TrustForge API 与 Technitium DNS 核心集成到同一宿主进程。
+- [x] 将 Linux 可用 DNS 核心和 DNS 应用纳入唯一的 `TrustForge.sln`；排除 Windows 服务与托盘启动器。
+- [x] 根 Docker Compose 改为构建并运行单个 TrustForge 应用镜像，PostgreSQL 作为同一部署栈中的持久化依赖；不再拉取独立 Technitium 镜像。
+- [x] Docker 启动前应用 PostgreSQL EF migrations；DNS 配置、DNS 日志和数据库分别持久化。
+- [x] 根 README 和部署手册改为 TrustForge 产品入口。
+- [ ] 在 Linux Docker 环境中实际构建并启动整套 Compose，验证 DNS 53/udp、53/tcp，DNS 管理端口和 TrustForge API/数据库健康状态。
+- [ ] DNS 管理 UI 仍使用其自己的 Technitium 登录；统一登录、入口/反向代理和统一导航属于后续产品工作。
+
+目录约定：开发只打开根目录的 `TrustForge.sln`；部署只使用根目录 `docker-compose.yml` 中的 TrustForge 应用镜像，不再单独部署 Technitium DNS Server。
+
 ## 已确定的产品与技术决策
 
 - [x] 以 Technitium DNS Server 为 DNS 基座；TrustForge 核心保持独立模块，通过适配器连接 DNS。
@@ -141,4 +153,4 @@
 
 ## 当前下一步
 
-当前下一步：启动本地 Keycloak 开发 realm（`TrustForge.Api/README.md`），配置 loopback issuer/audience，使用 PlatformAdmin token 在 PostgreSQL 沙箱上验证服务登记、手动任务创建和任务历史查询；随后实现持久化 Worker 与 PostgreSQL 任务领取/恢复，再接 Smallstep ACME、Technitium DNS-01 和 SSH。
+当前产品合并的代码、统一解决方案和 Docker 部署入口已完成；下一步在 Linux Docker 环境构建/启动整套 TrustForge Compose，确认 API、DNS 与 PostgreSQL 同栈运行，然后启动本地 Keycloak 开发 realm（`TrustForge.Api/README.md`），配置 loopback issuer/audience，验证授权 API；随后实现持久化 Worker 与 PostgreSQL 任务领取/恢复，再接 Smallstep ACME、Technitium DNS-01 和 SSH。

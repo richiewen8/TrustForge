@@ -13,7 +13,7 @@ TrustForge 以 Technitium DNS Server 为 DNS 基座，逐步建设面向企业�
 
 ## 产品原则与边界
 
-1. **DNS 核心保持 DNS 职责。** TrustForge 的 PKI 与生命周期领域逻辑应放在独立服务/模块中，通过稳定 API 和受控集成与 Technitium DNS 交互。
+1. **DNS 核心保持 DNS 职责，产品统一部署。** TrustForge 的 PKI 与生命周期逻辑保持独立模块；Technitium DNS 作为同一 TrustForge Linux 宿主进程中的内部能力运行，通过受控适配器集成。
 2. **私钥优先留在密钥边界内。** CA 签名密钥应由 HSM/KMS 或隔离的签名服务托管；Web/API 只提交经过授权的签名请求。开发环境可提供明确标注的本地测试后端。
 3. **先建立可审计的 CA 生命周期。** 创建 CA、签发、续期、吊销、CRL/OCSP 和备份恢复应有明确状态、权限和审计事件。
 4. **标准协议优先，适配器解耦。** ACME 等协议端点调用内部签发策略，不直接绕过策略或密钥边界。
@@ -51,6 +51,9 @@ TrustForge 以 Technitium DNS Server 为 DNS 基座，逐步建设面向企业�
 - **Web Console**：统一呈现 CA、证书、DNS 验证、任务、策略和审计。
 
 ## 与 Technitium 的集成策略
+
+- TrustForge 是唯一产品、解决方案入口和应用部署镜像；PostgreSQL 以 Compose 依赖服务运行。开发打开根目录 `TrustForge.sln`，部署使用根目录 `docker-compose.yml`。
+- API 和 DNS 引擎当前在同一进程中，但 API（OIDC/RBAC）与 DNS 管理控制台仍是两个 HTTP 入口；DNS 控制台保留 Technitium 自身认证，统一登录和导航尚未实现。
 
 - 保留其权威/递归 DNS、区域、DNSSEC、集群和现有管理能力，TrustForge 通过受版本管理的 API/适配器调用。
 - DNS-01 使用具备作用域限制的凭据，仅允许管理专用验证区域/记录；验证结束后清理挑战记录，并记录结果。
