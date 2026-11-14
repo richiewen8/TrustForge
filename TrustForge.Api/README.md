@@ -14,6 +14,10 @@ docker compose --env-file .env.trustforge -f docker-compose.trustforge-dev.yml u
 
 The same Compose file provides a local-only Keycloak realm. Start the development issuer with `docker compose --env-file .env.trustforge -f docker-compose.trustforge-dev.yml up -d keycloak`. It listens on loopback port 8180 and imports realm `trustforge-dev`, audience `trustforge-api`, and a `PlatformAdmin` user whose password comes from the ignored env file. The imported user includes the required email and name profile fields so direct password grants work on current Keycloak versions. The client explicitly maps `sub`, audience, and realm roles into access tokens. Keycloak `start-dev` and HTTP are for local development only.
 
+## Certificate job worker
+
+PostgreSQL-backed claiming and lease recovery are implemented. The worker is intentionally disabled by default (`CertificateJobs:Worker:Enabled=false`, or `TRUSTFORGE_WORKER_ENABLED=false` in Compose). Enabling it requires an `ICertificateJobProcessor` registration; no processor is registered until the Smallstep ACME, Technitium DNS-01, and SSH pipeline is implemented. The worker uses a renewable two-minute fencing-token lease by default and retries processor errors with bounded exponential delay. Do not enable it with a placeholder processor, because queued jobs must never be reported as issued without completing the actual issuance/deployment workflow.
+
 Set `ConnectionStrings__TrustForge` in the API process environment to the corresponding local connection string. The schema migration command is:
 
 ```powershell

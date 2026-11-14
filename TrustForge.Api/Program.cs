@@ -16,9 +16,17 @@ if (string.IsNullOrWhiteSpace(connectionString))
 builder.Services.AddTrustForgePersistence(connectionString);
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddScoped<CertificateJobCoordinator>();
+builder.Services.Configure<CertificateJobWorkerOptions>(builder.Configuration.GetSection("CertificateJobs:Worker"));
+bool runMigrations = args.Contains("--migrate", StringComparer.Ordinal);
+if (builder.Configuration.GetValue<bool>("CertificateJobs:Worker:Enabled") && !runMigrations)
+{
+    if (!builder.Services.Any(descriptor => descriptor.ServiceType == typeof(ICertificateJobProcessor)))
+        throw new InvalidOperationException("CertificateJobs:Worker:Enabled requires an ICertificateJobProcessor implementation.");
+    builder.Services.AddHostedService<CertificateJobWorker>();
+}
 builder.Services.AddHostedService<DnsServerHostedService>();
 
-if (args.Contains("--migrate", StringComparer.Ordinal))
+if (runMigrations)
 {
     WebApplication migrationApp = builder.Build();
     await using AsyncServiceScope scope = migrationApp.Services.CreateAsyncScope();

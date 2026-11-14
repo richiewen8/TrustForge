@@ -15,6 +15,9 @@ services:
       ConnectionStrings__TrustForge: Host=postgres;Port=5432;Database=trustforge;Username=trustforge;Password=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       Authentication__Authority: ${TRUSTFORGE_OIDC_AUTHORITY:?Set TRUSTFORGE_OIDC_AUTHORITY in .env}
       Authentication__Audience: ${TRUSTFORGE_OIDC_AUDIENCE:?Set TRUSTFORGE_OIDC_AUDIENCE in .env}
+      CertificateJobs__Worker__Enabled: ${TRUSTFORGE_WORKER_ENABLED:-false}
+      CertificateJobs__Worker__PollInterval: ${TRUSTFORGE_WORKER_POLL_INTERVAL:-00:00:02}
+      CertificateJobs__Worker__LeaseDuration: ${TRUSTFORGE_WORKER_LEASE_DURATION:-00:02:00}
       DnsServer__Enabled: "true"
       DnsServer__ConfigDirectory: /etc/trustforge/dns
     ports:

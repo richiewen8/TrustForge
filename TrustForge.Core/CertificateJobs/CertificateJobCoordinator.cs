@@ -1,6 +1,6 @@
 namespace TrustForge.Core.CertificateJobs;
 
-/// <summary>Coordinates durable job creation and guarded transitions. Worker execution is added separately.</summary>
+/// <summary>Coordinates durable job creation and guarded transitions.</summary>
 public sealed class CertificateJobCoordinator(ICertificateJobStore store, TimeProvider timeProvider)
 {
     public async Task<CertificateJob> CreateManualJobAsync(
@@ -40,6 +40,28 @@ public sealed class CertificateJobCoordinator(ICertificateJobStore store, TimePr
         long storedVersion = job.Version;
         job.TransitionTo(nextState, actor, timeProvider.GetUtcNow(), failureStage, failureSummary);
         if (!await store.TryUpdateAsync(job, storedVersion, cancellationToken))
+            throw new CertificateJobConcurrencyException(jobId, expectedVersion, null);
+        return job;
+    }
+
+    public async Task<CertificateJob> TransitionLeasedAsync(
+        Guid jobId,
+        long expectedVersion,
+        Guid leaseToken,
+        CertificateJobState nextState,
+        string actor,
+        string? failureStage = null,
+        string? failureSummary = null,
+        CancellationToken cancellationToken = default)
+    {
+        CertificateJob job = await store.FindByIdAsync(jobId, cancellationToken)
+            ?? throw new KeyNotFoundException($"Certificate job '{jobId}' was not found.");
+        if (job.Version != expectedVersion)
+            throw new CertificateJobConcurrencyException(jobId, expectedVersion, job.Version);
+
+        long storedVersion = job.Version;
+        job.TransitionTo(nextState, actor, timeProvider.GetUtcNow(), failureStage, failureSummary);
+        if (!await store.TryUpdateLeasedAsync(job, storedVersion, leaseToken, cancellationToken))
             throw new CertificateJobConcurrencyException(jobId, expectedVersion, null);
         return job;
     }

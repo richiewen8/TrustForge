@@ -15,7 +15,11 @@ public sealed class TrustForgeDbContext(DbContextOptions<TrustForgeDbContext> op
         modelBuilder.Entity<CertificateJobRecord>(entity =>
         {
             entity.ToTable("certificate_jobs", table =>
-                table.HasCheckConstraint("ck_certificate_jobs_version_nonnegative", "version >= 0"));
+            {
+                table.HasCheckConstraint("ck_certificate_jobs_version_nonnegative", "version >= 0");
+                table.HasCheckConstraint("ck_certificate_jobs_attempt_count_nonnegative", "attempt_count >= 0");
+                table.HasCheckConstraint("ck_certificate_jobs_lease_consistent", "(worker_lease_token IS NULL AND worker_lease_owner IS NULL AND worker_lease_expires_at IS NULL) OR (worker_lease_token IS NOT NULL AND worker_lease_owner IS NOT NULL AND worker_lease_expires_at IS NOT NULL)");
+            });
             entity.HasKey(job => job.Id).HasName("pk_certificate_jobs");
             entity.Property(job => job.Id).HasColumnName("id").ValueGeneratedNever();
             entity.Property(job => job.ServiceId).HasColumnName("service_id").IsRequired();
@@ -29,12 +33,19 @@ public sealed class TrustForgeDbContext(DbContextOptions<TrustForgeDbContext> op
             entity.Property(job => job.CertificateFingerprint).HasColumnName("certificate_fingerprint").HasMaxLength(256);
             entity.Property(job => job.FailureStage).HasColumnName("failure_stage").HasMaxLength(100);
             entity.Property(job => job.FailureSummary).HasColumnName("failure_summary");
+            entity.Property(job => job.WorkerLeaseOwner).HasColumnName("worker_lease_owner").HasMaxLength(128);
+            entity.Property(job => job.WorkerLeaseToken).HasColumnName("worker_lease_token");
+            entity.Property(job => job.WorkerLeaseExpiresAt).HasColumnName("worker_lease_expires_at");
+            entity.Property(job => job.NextAttemptAt).HasColumnName("next_attempt_at");
+            entity.Property(job => job.AttemptCount).HasColumnName("attempt_count").IsRequired();
 
             entity.HasIndex(job => new { job.ServiceId, job.RequestedBy, job.IdempotencyKey })
                 .IsUnique()
                 .HasDatabaseName("ux_certificate_jobs_idempotency");
             entity.HasIndex(job => new { job.State, job.CreatedAt })
                 .HasDatabaseName("ix_certificate_jobs_state_created_at");
+            entity.HasIndex(job => new { job.State, job.NextAttemptAt, job.WorkerLeaseExpiresAt, job.CreatedAt })
+                .HasDatabaseName("ix_certificate_jobs_worker_claim");
 
             entity.HasMany(job => job.Transitions)
                 .WithOne(transition => transition.Job)

@@ -14,5 +14,10 @@ internal sealed class CertificateJobRecord
     public string? CertificateFingerprint { get; set; }
     public string? FailureStage { get; set; }
     public string? FailureSummary { get; set; }
+    public string? WorkerLeaseOwner { get; set; }
+    public Guid? WorkerLeaseToken { get; set; }
+    public DateTimeOffset? WorkerLeaseExpiresAt { get; set; }
+    public DateTimeOffset? NextAttemptAt { get; set; }
+    public int AttemptCount { get; set; }
     public List<CertificateJobTransitionRecord> Transitions { get; set; } = [];
 }

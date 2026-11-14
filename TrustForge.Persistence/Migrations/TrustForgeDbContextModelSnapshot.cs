@@ -27,10 +27,21 @@ public sealed class TrustForgeDbContextModelSnapshot : ModelSnapshot
             entity.Property<string>("CertificateFingerprint").HasMaxLength(256).HasColumnType("character varying(256)").HasColumnName("certificate_fingerprint");
             entity.Property<string>("FailureStage").HasMaxLength(100).HasColumnType("character varying(100)").HasColumnName("failure_stage");
             entity.Property<string>("FailureSummary").HasColumnType("text").HasColumnName("failure_summary");
+            entity.Property<string>("WorkerLeaseOwner").HasMaxLength(128).HasColumnType("character varying(128)").HasColumnName("worker_lease_owner");
+            entity.Property<Guid?>("WorkerLeaseToken").HasColumnType("uuid").HasColumnName("worker_lease_token");
+            entity.Property<DateTimeOffset?>("WorkerLeaseExpiresAt").HasColumnType("timestamp with time zone").HasColumnName("worker_lease_expires_at");
+            entity.Property<DateTimeOffset?>("NextAttemptAt").HasColumnType("timestamp with time zone").HasColumnName("next_attempt_at");
+            entity.Property<int>("AttemptCount").IsRequired().HasColumnType("integer").HasColumnName("attempt_count");
             entity.HasKey("Id").HasName("pk_certificate_jobs");
             entity.HasIndex("ServiceId", "RequestedBy", "IdempotencyKey").IsUnique().HasDatabaseName("ux_certificate_jobs_idempotency");
             entity.HasIndex("State", "CreatedAt").HasDatabaseName("ix_certificate_jobs_state_created_at");
-            entity.ToTable("certificate_jobs", table => table.HasCheckConstraint("ck_certificate_jobs_version_nonnegative", "version >= 0"));
+            entity.HasIndex("State", "NextAttemptAt", "WorkerLeaseExpiresAt", "CreatedAt").HasDatabaseName("ix_certificate_jobs_worker_claim");
+            entity.ToTable("certificate_jobs", table =>
+            {
+                table.HasCheckConstraint("ck_certificate_jobs_version_nonnegative", "version >= 0");
+                table.HasCheckConstraint("ck_certificate_jobs_attempt_count_nonnegative", "attempt_count >= 0");
+                table.HasCheckConstraint("ck_certificate_jobs_lease_consistent", "(worker_lease_token IS NULL AND worker_lease_owner IS NULL AND worker_lease_expires_at IS NULL) OR (worker_lease_token IS NOT NULL AND worker_lease_owner IS NOT NULL AND worker_lease_expires_at IS NOT NULL)");
+            });
         });
 
         modelBuilder.Entity("TrustForge.Persistence.ManagedServices.ManagedServiceRecord", entity =>
