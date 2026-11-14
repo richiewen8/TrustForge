@@ -72,6 +72,9 @@
   "users": [
     {
       "username": "${TF_OIDC_DEV_USERNAME}",
+      "email": "${TF_OIDC_DEV_EMAIL}",
+      "firstName": "TrustForge",
+      "lastName": "Operator",
       "enabled": true,
       "emailVerified": true,
       "credentials": [
