@@ -15,5 +15,20 @@ services:
       timeout: 3s
       retries: 20
 
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.8.2
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${TF_OIDC_ADMIN_USER:?Set TF_OIDC_ADMIN_USER in .env.trustforge}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${TF_OIDC_ADMIN_PASSWORD:?Set TF_OIDC_ADMIN_PASSWORD in .env.trustforge}
+      KC_HOSTNAME: http://localhost:8180
+      KC_HTTP_ENABLED: "true"
+      TF_OIDC_DEV_USERNAME: ${TF_OIDC_DEV_USERNAME:?Set TF_OIDC_DEV_USERNAME in .env.trustforge}
+      TF_OIDC_DEV_PASSWORD: ${TF_OIDC_DEV_PASSWORD:?Set TF_OIDC_DEV_PASSWORD in .env.trustforge}
+    ports:
+      - "127.0.0.1:${TF_OIDC_PORT:-8180}:8080"
+    volumes:
+      - ./TrustForge.Api/keycloak:/opt/keycloak/data/import:ro
+
 volumes:
   trustforge-postgres-data:

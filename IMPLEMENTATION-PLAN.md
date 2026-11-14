@@ -69,7 +69,7 @@
 - [x] 写接口实施 JWT 角色授权；独立持久化的审计事件表尚未进入本阶段。
 - [ ] 在实际 PostgreSQL 和 OIDC issuer 环境中运行 API 并验证服务登记、任务创建、权限拒绝和状态查询。
 
-阶段 2 当前实现状态：API 宿主、Linux 服务登记模型、手动任务创建/查询 API、JWT/RBAC 和开发 PostgreSQL Compose 配置已实现；整个解决方案编译通过。API 的本机运行验证尚待提供 HTTPS OIDC issuer/audience 配置；持久层已通过实际 PostgreSQL smoke run 验证。
+阶段 2 当前实现状态：API 宿主、Linux 服务登记模型、手动任务创建/查询 API、JWT/RBAC 和本地 Keycloak/PostgreSQL 开发 Compose 配置已实现；整个解决方案编译通过。API 的本机运行验证尚待启动 Keycloak 并配置 issuer/audience；持久层已通过实际 PostgreSQL smoke run 验证。
 
 ## 阶段 3：可靠任务 Worker 与端口适配器
 
@@ -140,4 +140,4 @@
 
 ## 当前下一步
 
-当前下一步：配置一个开发用 HTTPS OIDC issuer/audience，在 PostgreSQL 沙箱上运行 `TrustForge.Api`，验证服务登记、权限控制、手动任务创建和任务历史查询；随后实现持久化 Worker 与 PostgreSQL 任务领取/恢复，再接 Smallstep ACME、Technitium DNS-01 和 SSH。
+当前下一步：启动本地 Keycloak 开发 realm，配置 loopback issuer/audience，在 PostgreSQL 沙箱上运行 `TrustForge.Api`，验证服务登记、权限控制、手动任务创建和任务历史查询；随后实现持久化 Worker 与 PostgreSQL 任务领取/恢复，再接 Smallstep ACME、Technitium DNS-01 和 SSH。

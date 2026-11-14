@@ -12,6 +12,8 @@ Copy-Item trustforge-dev.env.example .env.trustforge
 docker compose --env-file .env.trustforge -f docker-compose.trustforge-dev.yml up -d
 ```
 
+The same Compose file provides a local-only Keycloak realm. Start the development issuer with `docker compose --env-file .env.trustforge -f docker-compose.trustforge-dev.yml up -d keycloak`. It listens on loopback port 8180 and imports realm `trustforge-dev`, audience `trustforge-api`, and a `PlatformAdmin` user whose password comes from the ignored env file. Keycloak `start-dev` and HTTP are for local development only.
+
 Set `ConnectionStrings__TrustForge` in the API process environment to the corresponding local connection string. The schema migration command is:
 
 ```powershell
@@ -23,10 +25,13 @@ The command only applies checked-in EF Core migrations and exits. It reads the P
 ## Required API configuration
 
 - `ConnectionStrings__TrustForge`: PostgreSQL connection string.
-- `Authentication__Authority`: HTTPS OIDC issuer URL.
+- `Authentication__Authority`: HTTPS OIDC issuer URL. For the local Keycloak development realm use `http://localhost:8180/realms/trustforge-dev`.
 - `Authentication__Audience`: expected API audience.
+- `Authentication__AllowInsecureLoopback`: set to `true` only in `Development` when using the loopback Keycloak HTTP issuer; the API rejects this setting outside Development and only accepts a loopback authority.
 
 The identity token must include a `sub` claim and one of the `role` values `PlatformAdmin`, `CertificateOperator`, or `Auditor`. Operator roles can register services and create manual jobs; reader roles can inspect service and job details. The certificate profile and remote helper/action identifiers are references; profile/action management is implemented in later phases.
+
+With Keycloak running, configure `ASPNETCORE_ENVIRONMENT=Development`, `Authentication__Authority=http://localhost:8180/realms/trustforge-dev`, `Authentication__Audience=trustforge-api`, and `Authentication__AllowInsecureLoopback=true` before starting the API. The API requires HTTPS issuers outside this explicitly enabled local-development case.
 
 ## Endpoints
 

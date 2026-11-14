@@ -26,11 +26,16 @@ if (args.Contains("--migrate", StringComparer.Ordinal))
 
 string? authority = builder.Configuration["Authentication:Authority"];
 string? audience = builder.Configuration["Authentication:Audience"];
-if (!Uri.TryCreate(authority, UriKind.Absolute, out Uri? authorityUri)
-    || authorityUri.Scheme != Uri.UriSchemeHttps
+bool hasAuthorityUri = Uri.TryCreate(authority, UriKind.Absolute, out Uri? authorityUri);
+bool allowInsecureLoopback = builder.Environment.IsDevelopment()
+    && builder.Configuration.GetValue<bool>("Authentication:AllowInsecureLoopback")
+    && hasAuthorityUri
+    && authorityUri!.Scheme == Uri.UriSchemeHttp
+    && authorityUri.IsLoopback;
+if ((!hasAuthorityUri || authorityUri!.Scheme != Uri.UriSchemeHttps) && !allowInsecureLoopback
     || string.IsNullOrWhiteSpace(audience))
 {
-    throw new InvalidOperationException("Configure an HTTPS Authentication:Authority and Authentication:Audience before starting the API.");
+    throw new InvalidOperationException("Configure an HTTPS OIDC authority and audience. HTTP is allowed only for an explicitly enabled loopback issuer in Development.");
 }
 
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
@@ -38,7 +43,7 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     {
         options.Authority = authority;
         options.Audience = audience;
-        options.RequireHttpsMetadata = true;
+        options.RequireHttpsMetadata = !allowInsecureLoopback;
         options.MapInboundClaims = false;
         options.TokenValidationParameters = new TokenValidationParameters
         {
