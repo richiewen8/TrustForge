@@ -13,7 +13,7 @@
 - [x] 证书部署目标为 Linux PEM 文件，包含原子切换、服务重载、健康检查和失败回滚。
 - [x] 证书任务状态机和独立 `TrustForge.Core` 项目骨架已建立。
 
-## 阶段 1：PostgreSQL 持久化基础（当前阶段）
+## 阶段 1：PostgreSQL 持久化基础（已完成）
 
 ### 实施项
 
@@ -23,22 +23,24 @@
 - [x] 添加约束：主键、幂等唯一索引、任务版本并发更新条件和 transition 外键。
 - [x] 实现 `ICertificateJobStore`：按 ID 查询、按幂等作用域查询、原子创建和乐观并发更新。
 - [x] 定义初始数据库迁移、模型快照和初始化说明；连接字符串由宿主从安全配置/秘密管理来源传入，不写入仓库。
-- [ ] 明确数据库不可用时的启动/就绪状态、迁移失败行为、备份和恢复操作说明。
+- [x] 就绪端点在数据库不可用或存在待应用迁移时返回 503；显式迁移命令失败时以非零状态退出。
+- [ ] 补充并演练 PostgreSQL 备份和恢复操作。
 
 ### 阶段交付物
 
 - [x] 可单独构建的 Persistence 项目。
 - [x] 首版数据库 migration 与可配置 PostgreSQL 连接注册入口。
-- [ ] `CertificateJobCoordinator` 能在真实 PostgreSQL 上创建、查询、迁移状态并在服务进程重启后恢复（需待宿主/连接环境接入验证）。
+- [x] `CertificateJobCoordinator` 在真实 PostgreSQL 上创建任务并持久化状态转换；独立进程成功恢复终态前的任务状态和历史。
 
 ### 完成条件
 
 - [x] 数据库约束可阻止同一作用域幂等键重复创建任务。
 - [x] 状态与对应 transition history 通过同一 `SaveChanges` 事务写入。
 - [x] 并发更新使用版本条件拒绝过期写入。
-- [ ] 空数据库可应用迁移创建 schema；已有数据库可按后续 migration 升级（待连接 PostgreSQL 实例验证）。
+- [x] 已启动的 PostgreSQL 17 空白应用 schema 成功应用两条检查入库的 migration。
+- [ ] 在已有生产数据的数据库上验证后续 migration 升级策略。
 
-阶段 1 当前实现状态：Persistence 项目及其代码已完成，`dotnet build TrustForge.sln` 通过，EF Core 工具确认模型与迁移快照一致；本机无 Docker/Podman/psql/PostgreSQL 服务，尚未把迁移应用到实际数据库，也未验证进程重启恢复。
+阶段 1 验证记录：开发沙箱 PostgreSQL 17 已应用 `202611140001_InitialCertificateJobs` 和 `202611140002_ManagedServices`。临时 smoke run 创建任务、写入 `Queued → Connecting → GeneratingCsr`，随后由新的 dotnet 进程读回 `state=GeneratingCsr`、`version=2`、`transitions=2`；验证记录已清理。`dotnet build TrustForge.sln` 通过，EF Core 工具确认模型快照无待处理变化。
 
 ## 阶段 2：TrustForge API 与服务登记
 
@@ -65,9 +67,9 @@
 - [x] API 代码可创建并检索服务；手动请求返回稳定任务 ID。
 - [x] 相同作用域幂等键返回同一任务；实现从 PostgreSQL 读取任务状态/历史。
 - [x] 写接口实施 JWT 角色授权；独立持久化的审计事件表尚未进入本阶段。
-- [ ] 在实际 PostgreSQL 和 OIDC issuer 环境中运行 API 并验证端到端行为。
+- [ ] 在实际 PostgreSQL 和 OIDC issuer 环境中运行 API 并验证服务登记、任务创建、权限拒绝和状态查询。
 
-阶段 2 当前实现状态：API 宿主、Linux 服务登记模型、手动任务创建/查询 API、JWT/RBAC 和开发 PostgreSQL Compose 配置已实现；`dotnet build TrustForge.sln` 通过，EF Core 报告迁移快照无待处理模型变化。由于当前执行机没有 PostgreSQL 运行时，未执行真实数据库迁移/API 运行验证。
+阶段 2 当前实现状态：API 宿主、Linux 服务登记模型、手动任务创建/查询 API、JWT/RBAC 和开发 PostgreSQL Compose 配置已实现；整个解决方案编译通过。API 的本机运行验证尚待提供 HTTPS OIDC issuer/audience 配置；持久层已通过实际 PostgreSQL smoke run 验证。
 
 ## 阶段 3：可靠任务 Worker 与端口适配器
 
@@ -138,4 +140,4 @@
 
 ## 当前下一步
 
-当前下一步：在具备 Docker/Podman 或 PostgreSQL 的开发机上按 `TrustForge.Api/README.md` 启动 PostgreSQL，运行 `dotnet run --project TrustForge.Api -- --migrate` 并验证 readiness；随后配置 OIDC issuer，运行服务登记和手动任务 API。Worker、Smallstep ACME、Technitium DNS-01 与 SSH 仍按后续阶段顺序实现。
+当前下一步：配置一个开发用 HTTPS OIDC issuer/audience，在 PostgreSQL 沙箱上运行 `TrustForge.Api`，验证服务登记、权限控制、手动任务创建和任务历史查询；随后实现持久化 Worker 与 PostgreSQL 任务领取/恢复，再接 Smallstep ACME、Technitium DNS-01 和 SSH。
