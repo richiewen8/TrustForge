@@ -19,5 +19,6 @@ internal sealed class CertificateJobRecord
     public DateTimeOffset? WorkerLeaseExpiresAt { get; set; }
     public DateTimeOffset? NextAttemptAt { get; set; }
     public int AttemptCount { get; set; }
+    public string ExecutionCheckpoint { get; set; } = "{}";
     public List<CertificateJobTransitionRecord> Transitions { get; set; } = [];
 }

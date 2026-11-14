@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
 using Npgsql;
+using System.Text.Json;
 using TrustForge.Core.CertificateJobs;
 
 namespace TrustForge.Persistence.CertificateJobs;
@@ -64,6 +65,7 @@ public sealed class PostgresCertificateJobStore(IDbContextFactory<TrustForgeDbCo
         entry.Property(item => item.WorkerLeaseExpiresAt).IsModified = false;
         entry.Property(item => item.NextAttemptAt).IsModified = false;
         entry.Property(item => item.AttemptCount).IsModified = false;
+        entry.Property(item => item.ExecutionCheckpoint).IsModified = false;
 
         db.CertificateJobTransitions.Add(ToRecord(job.Id, job.Transitions[^1]));
         try
@@ -190,6 +192,30 @@ public sealed class PostgresCertificateJobStore(IDbContextFactory<TrustForgeDbCo
         return true;
     }
 
+    public async Task<bool> TryUpdateCheckpointLeasedAsync(
+        Guid jobId,
+        long expectedVersion,
+        Guid leaseToken,
+        CertificateJobCheckpoint checkpoint,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(checkpoint);
+        string json = JsonSerializer.Serialize(checkpoint);
+        if (json.Length > 65536)
+            throw new ArgumentException("The execution checkpoint must not exceed 64 KiB.", nameof(checkpoint));
+
+        await using TrustForgeDbContext db = await contextFactory.CreateDbContextAsync(cancellationToken);
+        int changed = await db.Database.ExecuteSqlInterpolatedAsync($"""
+            UPDATE certificate_jobs
+            SET execution_checkpoint = CAST({json} AS jsonb)
+            WHERE id = {jobId} AND version = {expectedVersion}
+              AND worker_lease_token = {leaseToken}
+              AND worker_lease_expires_at > clock_timestamp()
+              AND state IN ('Queued','Connecting','GeneratingCsr','CreatingOrder','AwaitingChallenge','Signing','Staging','Activating','Verifying')
+            """, cancellationToken);
+        return changed == 1;
+    }
+
     private static bool IsUniqueConstraintViolation(DbUpdateException exception)
     {
         for (Exception? current = exception; current is not null; current = current.InnerException)
@@ -216,7 +242,8 @@ public sealed class PostgresCertificateJobStore(IDbContextFactory<TrustForgeDbCo
             CertificateId = job.CertificateId,
             CertificateFingerprint = job.CertificateFingerprint,
             FailureStage = job.FailureStage,
-            FailureSummary = job.FailureSummary
+            FailureSummary = job.FailureSummary,
+            ExecutionCheckpoint = JsonSerializer.Serialize(job.Checkpoint)
         };
 
         if (includeTransitions)
@@ -262,6 +289,7 @@ public sealed class PostgresCertificateJobStore(IDbContextFactory<TrustForgeDbCo
             record.CertificateFingerprint,
             record.FailureStage,
             record.FailureSummary,
-            transitions);
+            transitions,
+            JsonSerializer.Deserialize<CertificateJobCheckpoint>(record.ExecutionCheckpoint));
     }
 }

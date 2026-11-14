@@ -18,6 +18,8 @@ The same Compose file provides a local-only Keycloak realm. Start the developmen
 
 PostgreSQL-backed claiming and lease recovery are implemented. The worker is intentionally disabled by default (`CertificateJobs:Worker:Enabled=false`, or `TRUSTFORGE_WORKER_ENABLED=false` in Compose). Enabling it requires an `ICertificateJobProcessor` registration; no processor is registered until the Smallstep ACME, Technitium DNS-01, and SSH pipeline is implemented. The worker uses a renewable two-minute fencing-token lease by default and retries processor errors with bounded exponential delay. Do not enable it with a placeholder processor, because queued jobs must never be reported as issued without completing the actual issuance/deployment workflow.
 
+For isolated state-machine development, set `ASPNETCORE_ENVIRONMENT=Development` and `CertificateJobs:Simulation:Enabled=true` (Compose: `TRUSTFORGE_SIMULATION_ENABLED=true`). The simulation advances each durable stage and ends at `Simulated`; it does not issue a certificate or connect to managed hosts. Production refuses this setting. See the repository's `CERTIFICATE-PIPELINE.md` for stage recovery semantics and adapter contracts.
+
 Set `ConnectionStrings__TrustForge` in the API process environment to the corresponding local connection string. The schema migration command is:
 
 ```powershell

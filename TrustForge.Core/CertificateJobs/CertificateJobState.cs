@@ -12,6 +12,7 @@ public enum CertificateJobState
     Activating,
     Verifying,
     Succeeded,
+    Simulated,
     Failed,
     FailedRolledBack,
     RollbackFailed,

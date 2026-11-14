@@ -18,7 +18,14 @@ builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddScoped<CertificateJobCoordinator>();
 builder.Services.Configure<CertificateJobWorkerOptions>(builder.Configuration.GetSection("CertificateJobs:Worker"));
 bool runMigrations = args.Contains("--migrate", StringComparer.Ordinal);
-if (builder.Configuration.GetValue<bool>("CertificateJobs:Worker:Enabled") && !runMigrations)
+bool simulationEnabled = builder.Configuration.GetValue<bool>("CertificateJobs:Simulation:Enabled");
+if (simulationEnabled && !runMigrations)
+{
+    if (!builder.Environment.IsDevelopment())
+        throw new InvalidOperationException("CertificateJobs:Simulation:Enabled is supported only in the Development environment.");
+    builder.Services.AddScoped<ICertificateJobProcessor, DevelopmentCertificateJobProcessor>();
+}
+if ((builder.Configuration.GetValue<bool>("CertificateJobs:Worker:Enabled") || simulationEnabled) && !runMigrations)
 {
     if (!builder.Services.Any(descriptor => descriptor.ServiceType == typeof(ICertificateJobProcessor)))
         throw new InvalidOperationException("CertificateJobs:Worker:Enabled requires an ICertificateJobProcessor implementation.");

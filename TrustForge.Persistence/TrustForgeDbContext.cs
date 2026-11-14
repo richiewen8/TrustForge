@@ -38,6 +38,7 @@ public sealed class TrustForgeDbContext(DbContextOptions<TrustForgeDbContext> op
             entity.Property(job => job.WorkerLeaseExpiresAt).HasColumnName("worker_lease_expires_at");
             entity.Property(job => job.NextAttemptAt).HasColumnName("next_attempt_at");
             entity.Property(job => job.AttemptCount).HasColumnName("attempt_count").IsRequired();
+            entity.Property(job => job.ExecutionCheckpoint).HasColumnName("execution_checkpoint").HasColumnType("jsonb").IsRequired();
 
             entity.HasIndex(job => new { job.ServiceId, job.RequestedBy, job.IdempotencyKey })
                 .IsUnique()

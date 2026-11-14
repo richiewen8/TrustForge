@@ -92,10 +92,12 @@
 - [x] 添加租约 owner、随机 fencing token、数据库时钟过期时间、attempt count、next-attempt 调度字段；续租、释放和带 token 的状态写入均在数据库校验。
 - [x] 崩溃恢复通过租约超时重领；异常重试采用有上限的指数退避；过期 Worker 不能使用旧 token 更新任务。
 - [x] Worker 默认关闭，且仅在配置启用并注册真实处理器后运行，防止空处理器吞掉待签任务。
+- [x] 定义 ACME、Technitium DNS-01、Linux SSH 部署接口及逐阶段恢复协议；checkpoint 通过 JSONB 与租约 fencing token 持久化，明确禁止写入私钥和凭据。
+- [x] 增加仅 Development 可显式启用的模拟处理器；它逐阶段推进状态机，终态为 `Simulated`，不签证书、不部署，也不返回 `Succeeded`。
 - [ ] 新建/注入实际签发处理器，并按任务当前持久状态恢复各阶段；外部操作必须幂等并实现对账。
-- [ ] 定义窄接口：`ICertificateIssuer`（ACME）、`IDnsChallengeProvider`（Technitium）、`ILinuxCertificateDeployer`（SSH）。
+- [x] 定义窄接口：`ICertificateIssuer`（ACME）、`IDnsChallengeProvider`（Technitium）、`ILinuxCertificateDeployer`（SSH）。
 - [x] 建立租约续期和有界重试基础；每阶段超时、取消边界和失败阶段摘要由后续实际 Pipeline 处理器补齐。
-- [ ] 在真实外部适配器前提供仅用于开发/隔离环境的模拟实现，验证状态机编排。
+- [x] 在真实外部适配器前提供仅用于开发/隔离环境的模拟实现，验证状态机编排。
 - [ ] 引入 outbox 或等效事务性事件模式，保证任务提交与异步工作通知不会丢失。
 
 ### 完成条件
@@ -158,3 +160,5 @@
 ## 当前下一步
 
 阶段 3 Worker 基础已实现并通过 Release 构建：PostgreSQL 租约/安全领取、版本与 token 双重校验、崩溃恢复、心跳续租和退避重试。Worker 默认关闭；当前没有虚假的签发模拟器或生产处理器。下一步实现开发模拟处理器和 Pipeline 协议，然后依次接 Smallstep ACME、Technitium DNS-01、SSH 部署与回滚。
+
+Pipeline 协议、JSONB 恢复 checkpoint、ACME/DNS/SSH 窄接口以及 Development-only 模拟处理器已加入；模拟任务终态明确为 `Simulated`。协议细节见 `CERTIFICATE-PIPELINE.md`。真实 Smallstep ACME 适配器是下一项工作。

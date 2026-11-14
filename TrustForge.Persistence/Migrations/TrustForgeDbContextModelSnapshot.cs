@@ -32,6 +32,7 @@ public sealed class TrustForgeDbContextModelSnapshot : ModelSnapshot
             entity.Property<DateTimeOffset?>("WorkerLeaseExpiresAt").HasColumnType("timestamp with time zone").HasColumnName("worker_lease_expires_at");
             entity.Property<DateTimeOffset?>("NextAttemptAt").HasColumnType("timestamp with time zone").HasColumnName("next_attempt_at");
             entity.Property<int>("AttemptCount").IsRequired().HasColumnType("integer").HasColumnName("attempt_count");
+            entity.Property<string>("ExecutionCheckpoint").IsRequired().HasColumnType("jsonb").HasColumnName("execution_checkpoint");
             entity.HasKey("Id").HasName("pk_certificate_jobs");
             entity.HasIndex("ServiceId", "RequestedBy", "IdempotencyKey").IsUnique().HasDatabaseName("ux_certificate_jobs_idempotency");
             entity.HasIndex("State", "CreatedAt").HasDatabaseName("ix_certificate_jobs_state_created_at");

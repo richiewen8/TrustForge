@@ -14,7 +14,7 @@ public sealed class CertificateJob
             [CertificateJobState.Signing] = [CertificateJobState.Staging, CertificateJobState.Failed, CertificateJobState.Cancelled],
             [CertificateJobState.Staging] = [CertificateJobState.Activating, CertificateJobState.Failed, CertificateJobState.Cancelled],
             [CertificateJobState.Activating] = [CertificateJobState.Verifying, CertificateJobState.FailedRolledBack, CertificateJobState.RollbackFailed],
-            [CertificateJobState.Verifying] = [CertificateJobState.Succeeded, CertificateJobState.FailedRolledBack, CertificateJobState.RollbackFailed]
+            [CertificateJobState.Verifying] = [CertificateJobState.Succeeded, CertificateJobState.Simulated, CertificateJobState.FailedRolledBack, CertificateJobState.RollbackFailed]
         };
 
     private readonly List<CertificateJobTransition> _transitions = [];
@@ -41,6 +41,7 @@ public sealed class CertificateJob
     public string? CertificateFingerprint { get; private set; }
     public string? FailureStage { get; private set; }
     public string? FailureSummary { get; private set; }
+    public CertificateJobCheckpoint Checkpoint { get; private set; } = new();
     public IReadOnlyList<CertificateJobTransition> Transitions => _transitions.AsReadOnly();
 
     public static CertificateJob Create(Guid serviceId, string requestedBy, string idempotencyKey, DateTimeOffset createdAt)
@@ -66,7 +67,8 @@ public sealed class CertificateJob
         string? certificateFingerprint,
         string? failureStage,
         string? failureSummary,
-        IEnumerable<CertificateJobTransition> transitions)
+        IEnumerable<CertificateJobTransition> transitions,
+        CertificateJobCheckpoint? checkpoint = null)
     {
         if (id == Guid.Empty)
             throw new ArgumentException("A job ID is required.", nameof(id));
@@ -79,7 +81,8 @@ public sealed class CertificateJob
             CertificateId = certificateId,
             CertificateFingerprint = certificateFingerprint,
             FailureStage = failureStage,
-            FailureSummary = failureSummary
+            FailureSummary = failureSummary,
+            Checkpoint = checkpoint ?? new CertificateJobCheckpoint()
         };
 
         CertificateJobState expectedFrom = CertificateJobState.Queued;
@@ -98,6 +101,12 @@ public sealed class CertificateJob
             throw new InvalidOperationException("Persisted certificate job state does not match its transition history.");
 
         return job;
+    }
+
+    public void SetCheckpoint(CertificateJobCheckpoint checkpoint)
+    {
+        ArgumentNullException.ThrowIfNull(checkpoint);
+        Checkpoint = checkpoint;
     }
 
     public void TransitionTo(
@@ -146,6 +155,6 @@ public sealed class CertificateJob
     }
 
     public static bool IsTerminal(CertificateJobState state) => state is
-        CertificateJobState.Succeeded or CertificateJobState.Failed or CertificateJobState.FailedRolledBack or
+        CertificateJobState.Succeeded or CertificateJobState.Simulated or CertificateJobState.Failed or CertificateJobState.FailedRolledBack or
         CertificateJobState.RollbackFailed or CertificateJobState.Cancelled;
 }

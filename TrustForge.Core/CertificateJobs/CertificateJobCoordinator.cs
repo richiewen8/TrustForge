@@ -65,4 +65,19 @@ public sealed class CertificateJobCoordinator(ICertificateJobStore store, TimePr
             throw new CertificateJobConcurrencyException(jobId, expectedVersion, null);
         return job;
     }
+
+    public async Task SaveCheckpointLeasedAsync(
+        Guid jobId,
+        long expectedVersion,
+        Guid leaseToken,
+        CertificateJobCheckpoint checkpoint,
+        CancellationToken cancellationToken = default)
+    {
+        CertificateJob job = await store.FindByIdAsync(jobId, cancellationToken)
+            ?? throw new KeyNotFoundException($"Certificate job '{jobId}' was not found.");
+        if (job.Version != expectedVersion)
+            throw new CertificateJobConcurrencyException(jobId, expectedVersion, job.Version);
+        if (!await store.TryUpdateCheckpointLeasedAsync(jobId, expectedVersion, leaseToken, checkpoint, cancellationToken))
+            throw new CertificateJobConcurrencyException(jobId, expectedVersion, null);
+    }
 }
