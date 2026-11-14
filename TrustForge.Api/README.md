@@ -12,7 +12,7 @@ Copy-Item trustforge-dev.env.example .env.trustforge
 docker compose --env-file .env.trustforge -f docker-compose.trustforge-dev.yml up -d
 ```
 
-The same Compose file provides a local-only Keycloak realm. Start the development issuer with `docker compose --env-file .env.trustforge -f docker-compose.trustforge-dev.yml up -d keycloak`. It listens on loopback port 8180 and imports realm `trustforge-dev`, audience `trustforge-api`, and a `PlatformAdmin` user whose password comes from the ignored env file. The imported user includes the required email and name profile fields so direct password grants work on current Keycloak versions. Keycloak `start-dev` and HTTP are for local development only.
+The same Compose file provides a local-only Keycloak realm. Start the development issuer with `docker compose --env-file .env.trustforge -f docker-compose.trustforge-dev.yml up -d keycloak`. It listens on loopback port 8180 and imports realm `trustforge-dev`, audience `trustforge-api`, and a `PlatformAdmin` user whose password comes from the ignored env file. The imported user includes the required email and name profile fields so direct password grants work on current Keycloak versions. The client explicitly maps `sub`, audience, and realm roles into access tokens. Keycloak `start-dev` and HTTP are for local development only.
 
 Set `ConnectionStrings__TrustForge` in the API process environment to the corresponding local connection string. The schema migration command is:
 
