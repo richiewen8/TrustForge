@@ -33,6 +33,35 @@ public sealed class TrustForgeDbContextModelSnapshot : ModelSnapshot
             entity.ToTable("certificate_jobs", table => table.HasCheckConstraint("ck_certificate_jobs_version_nonnegative", "version >= 0"));
         });
 
+        modelBuilder.Entity("TrustForge.Persistence.ManagedServices.ManagedServiceRecord", entity =>
+        {
+            entity.Property<Guid>("Id").HasColumnType("uuid").HasColumnName("id");
+            entity.Property<string>("Name").IsRequired().HasMaxLength(128).HasColumnType("character varying(128)").HasColumnName("name");
+            entity.Property<string>("Environment").IsRequired().HasMaxLength(64).HasColumnType("character varying(64)").HasColumnName("environment");
+            entity.Property<string>("Owner").IsRequired().HasMaxLength(256).HasColumnType("character varying(256)").HasColumnName("owner");
+            entity.Property<string>("Host").IsRequired().HasMaxLength(253).HasColumnType("character varying(253)").HasColumnName("host");
+            entity.Property<int>("Port").IsRequired().HasColumnType("integer").HasColumnName("port");
+            entity.Property<string>("HostKeyFingerprint").IsRequired().HasMaxLength(128).HasColumnType("character varying(128)").HasColumnName("host_key_fingerprint");
+            entity.Property<string>("SshCredentialRef").IsRequired().HasMaxLength(512).HasColumnType("character varying(512)").HasColumnName("ssh_credential_ref");
+            entity.Property<Guid>("ProfileId").IsRequired().HasColumnType("uuid").HasColumnName("profile_id");
+            entity.Property<string[]>("Sans").IsRequired().HasColumnType("text[]").HasColumnName("sans");
+            entity.Property<string>("CertificatePath").IsRequired().HasMaxLength(1024).HasColumnType("character varying(1024)").HasColumnName("certificate_path");
+            entity.Property<string>("ChainPath").IsRequired().HasMaxLength(1024).HasColumnType("character varying(1024)").HasColumnName("chain_path");
+            entity.Property<string>("PrivateKeyPath").IsRequired().HasMaxLength(1024).HasColumnType("character varying(1024)").HasColumnName("private_key_path");
+            entity.Property<string>("FileOwner").IsRequired().HasMaxLength(32).HasColumnType("character varying(32)").HasColumnName("file_owner");
+            entity.Property<string>("FileGroup").IsRequired().HasMaxLength(32).HasColumnType("character varying(32)").HasColumnName("file_group");
+            entity.Property<string>("FileMode").IsRequired().HasMaxLength(4).HasColumnType("character varying(4)").HasColumnName("file_mode");
+            entity.Property<string>("RemoteHelperId").IsRequired().HasMaxLength(64).HasColumnType("character varying(64)").HasColumnName("remote_helper_id");
+            entity.Property<string>("ReloadActionId").IsRequired().HasMaxLength(64).HasColumnType("character varying(64)").HasColumnName("reload_action_id");
+            entity.Property<string>("HealthCheckId").IsRequired().HasMaxLength(64).HasColumnType("character varying(64)").HasColumnName("health_check_id");
+            entity.Property<bool>("Enabled").IsRequired().HasColumnType("boolean").HasColumnName("enabled");
+            entity.Property<DateTimeOffset>("CreatedAt").IsRequired().HasColumnType("timestamp with time zone").HasColumnName("created_at");
+            entity.Property<DateTimeOffset>("UpdatedAt").IsRequired().HasColumnType("timestamp with time zone").HasColumnName("updated_at");
+            entity.HasKey("Id").HasName("pk_managed_services");
+            entity.HasIndex("Enabled", "Environment").HasDatabaseName("ix_managed_services_enabled_environment");
+            entity.ToTable("managed_services", table => table.HasCheckConstraint("ck_managed_services_port_range", "port BETWEEN 1 AND 65535"));
+        });
+
         modelBuilder.Entity("TrustForge.Persistence.CertificateJobs.CertificateJobTransitionRecord", entity =>
         {
             entity.Property<Guid>("JobId").HasColumnType("uuid").HasColumnName("job_id");

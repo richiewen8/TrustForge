@@ -1,0 +1,25 @@
+namespace TrustForge.Core.ManagedServices;
+
+public sealed record ManagedService(
+    Guid Id,
+    string Name,
+    string Environment,
+    string Owner,
+    string Host,
+    int Port,
+    string HostKeyFingerprint,
+    string SshCredentialRef,
+    Guid ProfileId,
+    IReadOnlyList<string> Sans,
+    string CertificatePath,
+    string ChainPath,
+    string PrivateKeyPath,
+    string FileOwner,
+    string FileGroup,
+    string FileMode,
+    string RemoteHelperId,
+    string ReloadActionId,
+    string HealthCheckId,
+    bool Enabled,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt);

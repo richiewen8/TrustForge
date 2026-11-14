@@ -6,6 +6,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TrustForge.Core", "TrustFor
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TrustForge.Persistence", "TrustForge.Persistence\TrustForge.Persistence.csproj", "{9C5F2B19-62E2-4DA6-8E0E-6C1326C79282}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TrustForge.Api", "TrustForge.Api\TrustForge.Api.csproj", "{2D105631-F640-44E9-8A1B-3A2AB1165468}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -20,5 +22,9 @@ Global
 		{9C5F2B19-62E2-4DA6-8E0E-6C1326C79282}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{9C5F2B19-62E2-4DA6-8E0E-6C1326C79282}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{9C5F2B19-62E2-4DA6-8E0E-6C1326C79282}.Release|Any CPU.Build.0 = Release|Any CPU
+		{2D105631-F640-44E9-8A1B-3A2AB1165468}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{2D105631-F640-44E9-8A1B-3A2AB1165468}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{2D105631-F640-44E9-8A1B-3A2AB1165468}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{2D105631-F640-44E9-8A1B-3A2AB1165468}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal

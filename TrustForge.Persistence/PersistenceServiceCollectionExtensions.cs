@@ -1,7 +1,9 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using TrustForge.Core.CertificateJobs;
+using TrustForge.Core.ManagedServices;
 using TrustForge.Persistence.CertificateJobs;
+using TrustForge.Persistence.ManagedServices;
 
 namespace TrustForge.Persistence;
 
@@ -15,6 +17,7 @@ public static class PersistenceServiceCollectionExtensions
             options.UseNpgsql(connectionString, npgsql =>
                 npgsql.MigrationsAssembly(typeof(TrustForgeDbContext).Assembly.FullName)));
         services.AddScoped<ICertificateJobStore, PostgresCertificateJobStore>();
+        services.AddScoped<IManagedServiceStore, PostgresManagedServiceStore>();
         services.AddScoped<TrustForgeDatabaseMigrator>();
         return services;
     }

@@ -38,18 +38,18 @@
 - [x] 并发更新使用版本条件拒绝过期写入。
 - [ ] 空数据库可应用迁移创建 schema；已有数据库可按后续 migration 升级（待连接 PostgreSQL 实例验证）。
 
-阶段 1 当前实现状态：Persistence 项目及其代码已完成，`dotnet build TrustForge.sln` 通过；尚未配置或连接实际 PostgreSQL 实例，因此数据库迁移和重启恢复仍需在运行环境中验证。
+阶段 1 当前实现状态：Persistence 项目及其代码已完成，`dotnet build TrustForge.sln` 通过，EF Core 工具确认模型与迁移快照一致；本机无 Docker/Podman/psql/PostgreSQL 服务，尚未把迁移应用到实际数据库，也未验证进程重启恢复。
 
 ## 阶段 2：TrustForge API 与服务登记
 
 ### 实施项
 
-- [ ] 新建独立 `TrustForge.Api` 宿主项目，不将 PKI 数据模型塞入 Technitium DNS 核心。
-- [ ] 实现 API 版本、统一错误响应、请求验证、结构化日志和健康/就绪端点。
-- [ ] 定义并持久化 `ManagedService`、证书模板引用、主机 SSH 配置引用、证书/链/私钥路径、reload 与 health-check 配置。
-- [ ] 实现服务创建、详情、更新、启停接口；秘密值只保存外部秘密引用。
-- [ ] 实现手动创建证书任务与任务查询接口；写操作带操作者身份和审计事件。
-- [ ] 初始认证/RBAC 至少区分 PlatformAdmin、CertificateOperator、Auditor；未完成身份集成前不得开放未授权公网访问。
+- [x] 新建独立 `TrustForge.Api` 宿主项目，不将 PKI 数据模型塞入 Technitium DNS 核心。
+- [x] 实现请求验证、结构化默认日志、存活/就绪端点；统一错误响应格式待后续完善。
+- [x] 定义并持久化 `ManagedService`、证书模板引用、主机 SSH 配置引用、证书/链/私钥路径、reload 与 health-check 配置。
+- [x] 实现服务创建与详情接口；更新/启停接口待后续完善；秘密值只保存外部秘密引用。
+- [x] 实现手动创建证书任务与任务查询接口；任务以 `Queued` 持久化，Worker 执行仍未接入。
+- [x] 配置 JWT bearer 验证及 PlatformAdmin、CertificateOperator、Auditor 授权策略；需部署方提供 HTTPS OIDC issuer 和 audience。
 
 ### 首批 API
 
@@ -62,9 +62,12 @@
 
 ### 完成条件
 
-- 可创建并检索服务；手动请求返回稳定任务 ID。
-- 相同作用域幂等键返回同一任务；任务状态/历史来自 PostgreSQL。
-- 所有写请求实施权限校验并生成审计记录。
+- [x] API 代码可创建并检索服务；手动请求返回稳定任务 ID。
+- [x] 相同作用域幂等键返回同一任务；实现从 PostgreSQL 读取任务状态/历史。
+- [x] 写接口实施 JWT 角色授权；独立持久化的审计事件表尚未进入本阶段。
+- [ ] 在实际 PostgreSQL 和 OIDC issuer 环境中运行 API 并验证端到端行为。
+
+阶段 2 当前实现状态：API 宿主、Linux 服务登记模型、手动任务创建/查询 API、JWT/RBAC 和开发 PostgreSQL Compose 配置已实现；`dotnet build TrustForge.sln` 通过，EF Core 报告迁移快照无待处理模型变化。由于当前执行机没有 PostgreSQL 运行时，未执行真实数据库迁移/API 运行验证。
 
 ## 阶段 3：可靠任务 Worker 与端口适配器
 
@@ -135,4 +138,4 @@
 
 ## 当前下一步
 
-从阶段 1 开始：创建 `TrustForge.Persistence` 项目，接入 PostgreSQL/EF Core migrations，并把现有 `ICertificateJobStore` 落到数据库。完成前不开始接入真实 Smallstep、DNS 或 SSH，避免外部流程依赖不可靠的任务存储。
+当前下一步：在具备 Docker/Podman 或 PostgreSQL 的开发机上按 `TrustForge.Api/README.md` 启动 PostgreSQL，运行 `dotnet run --project TrustForge.Api -- --migrate` 并验证 readiness；随后配置 OIDC issuer，运行服务登记和手动任务 API。Worker、Smallstep ACME、Technitium DNS-01 与 SSH 仍按后续阶段顺序实现。

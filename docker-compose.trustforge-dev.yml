@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${TF_POSTGRES_DB:-trustforge_dev}
+      POSTGRES_USER: ${TF_POSTGRES_USER:-trustforge}
+      POSTGRES_PASSWORD: ${TF_POSTGRES_PASSWORD:?Set TF_POSTGRES_PASSWORD in .env.trustforge}
+    ports:
+      - "127.0.0.1:${TF_POSTGRES_PORT:-54329}:5432"
+    volumes:
+      - trustforge-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  trustforge-postgres-data:

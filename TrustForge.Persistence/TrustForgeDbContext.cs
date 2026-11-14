@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using TrustForge.Persistence.CertificateJobs;
+using TrustForge.Persistence.ManagedServices;
 
 namespace TrustForge.Persistence;
 
@@ -7,6 +8,7 @@ public sealed class TrustForgeDbContext(DbContextOptions<TrustForgeDbContext> op
 {
     internal DbSet<CertificateJobRecord> CertificateJobs => Set<CertificateJobRecord>();
     internal DbSet<CertificateJobTransitionRecord> CertificateJobTransitions => Set<CertificateJobTransitionRecord>();
+    internal DbSet<ManagedServiceRecord> ManagedServices => Set<ManagedServiceRecord>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -53,6 +55,37 @@ public sealed class TrustForgeDbContext(DbContextOptions<TrustForgeDbContext> op
             entity.Property(transition => transition.Actor).HasColumnName("actor").HasMaxLength(256).IsRequired();
             entity.Property(transition => transition.FailureStage).HasColumnName("failure_stage").HasMaxLength(100);
             entity.Property(transition => transition.FailureSummary).HasColumnName("failure_summary");
+        });
+
+        modelBuilder.Entity<ManagedServiceRecord>(entity =>
+        {
+            entity.ToTable("managed_services", table =>
+                table.HasCheckConstraint("ck_managed_services_port_range", "port BETWEEN 1 AND 65535"));
+            entity.HasKey(service => service.Id).HasName("pk_managed_services");
+            entity.Property(service => service.Id).HasColumnName("id").ValueGeneratedNever();
+            entity.Property(service => service.Name).HasColumnName("name").HasMaxLength(128).IsRequired();
+            entity.Property(service => service.Environment).HasColumnName("environment").HasMaxLength(64).IsRequired();
+            entity.Property(service => service.Owner).HasColumnName("owner").HasMaxLength(256).IsRequired();
+            entity.Property(service => service.Host).HasColumnName("host").HasMaxLength(253).IsRequired();
+            entity.Property(service => service.Port).HasColumnName("port").IsRequired();
+            entity.Property(service => service.HostKeyFingerprint).HasColumnName("host_key_fingerprint").HasMaxLength(128).IsRequired();
+            entity.Property(service => service.SshCredentialRef).HasColumnName("ssh_credential_ref").HasMaxLength(512).IsRequired();
+            entity.Property(service => service.ProfileId).HasColumnName("profile_id").IsRequired();
+            entity.Property(service => service.Sans).HasColumnName("sans").IsRequired();
+            entity.Property(service => service.CertificatePath).HasColumnName("certificate_path").HasMaxLength(1024).IsRequired();
+            entity.Property(service => service.ChainPath).HasColumnName("chain_path").HasMaxLength(1024).IsRequired();
+            entity.Property(service => service.PrivateKeyPath).HasColumnName("private_key_path").HasMaxLength(1024).IsRequired();
+            entity.Property(service => service.FileOwner).HasColumnName("file_owner").HasMaxLength(32).IsRequired();
+            entity.Property(service => service.FileGroup).HasColumnName("file_group").HasMaxLength(32).IsRequired();
+            entity.Property(service => service.FileMode).HasColumnName("file_mode").HasMaxLength(4).IsRequired();
+            entity.Property(service => service.RemoteHelperId).HasColumnName("remote_helper_id").HasMaxLength(64).IsRequired();
+            entity.Property(service => service.ReloadActionId).HasColumnName("reload_action_id").HasMaxLength(64).IsRequired();
+            entity.Property(service => service.HealthCheckId).HasColumnName("health_check_id").HasMaxLength(64).IsRequired();
+            entity.Property(service => service.Enabled).HasColumnName("enabled").IsRequired();
+            entity.Property(service => service.CreatedAt).HasColumnName("created_at").IsRequired();
+            entity.Property(service => service.UpdatedAt).HasColumnName("updated_at").IsRequired();
+            entity.HasIndex(service => new { service.Enabled, service.Environment })
+                .HasDatabaseName("ix_managed_services_enabled_environment");
         });
     }
 }
