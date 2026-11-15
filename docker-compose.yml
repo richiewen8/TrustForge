@@ -17,8 +17,20 @@ services:
       Authentication__Audience: ${TRUSTFORGE_OIDC_AUDIENCE:?Set TRUSTFORGE_OIDC_AUDIENCE in .env}
       CertificateJobs__Worker__Enabled: ${TRUSTFORGE_WORKER_ENABLED:-false}
       CertificateJobs__Simulation__Enabled: ${TRUSTFORGE_SIMULATION_ENABLED:-false}
+      CertificateJobs__Artifacts__Directory: /var/lib/trustforge/artifacts
       CertificateJobs__Worker__PollInterval: ${TRUSTFORGE_WORKER_POLL_INTERVAL:-00:00:02}
       CertificateJobs__Worker__LeaseDuration: ${TRUSTFORGE_WORKER_LEASE_DURATION:-00:02:00}
+      SmallstepAcme__DirectoryUrl: ${TRUSTFORGE_ACME_DIRECTORY_URL:-}
+      SmallstepAcme__AccountEmail: ${TRUSTFORGE_ACME_ACCOUNT_EMAIL:-}
+      SmallstepAcme__AccountKeySecretRef: ${TRUSTFORGE_ACME_ACCOUNT_KEY_REF:-}
+      SmallstepAcme__EabKeyId: ${TRUSTFORGE_ACME_EAB_KEY_ID:-}
+      SmallstepAcme__EabKeySecretRef: ${TRUSTFORGE_ACME_EAB_KEY_REF:-}
+      SmallstepAcme__RootCertificatePath: ${TRUSTFORGE_ACME_ROOT_CERT_PATH:-}
+      TechnitiumDns__BaseUrl: ${TRUSTFORGE_TECHNITIUM_API_URL:-http://127.0.0.1:5380}
+      TechnitiumDns__ApiTokenSecretRef: ${TRUSTFORGE_TECHNITIUM_API_TOKEN_REF:-}
+      TechnitiumDns__AllowedZones__0: ${TRUSTFORGE_DNS_CHALLENGE_ZONE_0:-}
+      TechnitiumDns__ResolverAddress: ${TRUSTFORGE_DNS_CHALLENGE_RESOLVER_ADDRESS:-127.0.0.1}
+      TechnitiumDns__ResolverPort: ${TRUSTFORGE_DNS_CHALLENGE_RESOLVER_PORT:-53}
       DnsServer__Enabled: "true"
       DnsServer__ConfigDirectory: /etc/trustforge/dns
     ports:
@@ -35,6 +47,7 @@ services:
     volumes:
       - trustforge-dns-config:/etc/trustforge/dns
       - trustforge-dns-logs:/var/log/technitium/dns
+      - trustforge-certificate-artifacts:/var/lib/trustforge/artifacts
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://127.0.0.1:5000/health/ready"]
       interval: 30s
@@ -63,3 +76,4 @@ volumes:
   trustforge-dns-config:
   trustforge-dns-logs:
   trustforge-postgres-data:
+  trustforge-certificate-artifacts:

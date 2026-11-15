@@ -1,0 +1,4 @@
+{
+  "demo-tls-reload": ["/usr/local/libexec/trustforge-demo/reload.sh", "{service_id}"],
+  "demo-tls-health": ["/usr/local/libexec/trustforge-demo/health.sh", "{service_id}"]
+}

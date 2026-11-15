@@ -21,7 +21,9 @@ public interface ICertificateIssuer
         IReadOnlyList<string> identifiers,
         CancellationToken cancellationToken = default);
 
-    Task<Dns01Challenge> GetDns01ChallengeAsync(string orderUrl, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<Dns01Challenge>> GetDns01ChallengesAsync(string orderUrl, CancellationToken cancellationToken = default);
+
+    Task TriggerDnsAuthorizationAsync(string orderUrl, string authorizationUrl, CancellationToken cancellationToken = default);
 
     Task WaitForAuthorizationAsync(string orderUrl, string authorizationUrl, CancellationToken cancellationToken = default);
 
@@ -54,7 +56,7 @@ public interface ILinuxCertificateDeployer
         IssuedCertificateBundle certificate,
         CancellationToken cancellationToken = default);
 
-    Task ActivateAsync(ManagedService service, Guid jobId, string releaseId, CancellationToken cancellationToken = default);
+    Task<string?> ActivateAsync(ManagedService service, Guid jobId, string releaseId, CancellationToken cancellationToken = default);
 
     Task VerifyAsync(ManagedService service, Guid jobId, string releaseId, string expectedFingerprint, CancellationToken cancellationToken = default);
 

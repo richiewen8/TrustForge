@@ -1,0 +1,145 @@
+name: trustforge-acme-lab
+
+services:
+  trustforge:
+    build:
+      context: ../../..
+      dockerfile: TrustForge/Dockerfile
+    image: trustforge:acme-lab
+    hostname: trustforge
+    networks:
+      lab:
+        ipv4_address: ${LAB_SUBNET_PREFIX:-172.30.90}.10
+    ports:
+      - "127.0.0.1:${LAB_API_PORT:-5080}:5000"
+      - "127.0.0.1:${LAB_DNS_UI_PORT:-5780}:5380"
+      - "127.0.0.1:${LAB_OIDC_PORT:-8280}:${LAB_OIDC_PORT:-8280}"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:5000
+      ConnectionStrings__TrustForge: Host=postgres;Port=5432;Database=${LAB_POSTGRES_DB:-trustforge_lab};Username=${LAB_POSTGRES_USER:-trustforge};Password=${LAB_POSTGRES_PASSWORD:?Set LAB_POSTGRES_PASSWORD in .env}
+      Authentication__Authority: http://localhost:${LAB_OIDC_PORT:-8280}/realms/trustforge-dev
+      Authentication__Audience: trustforge-api
+      Authentication__AllowInsecureLoopback: "true"
+      CertificateJobs__Worker__Enabled: "true"
+      CertificateJobs__Simulation__Enabled: "false"
+      CertificateJobs__Artifacts__Directory: /var/lib/trustforge/artifacts
+      CertificateJobs__Worker__PollInterval: 00:00:02
+      CertificateJobs__Worker__LeaseDuration: 00:02:00
+      SmallstepAcme__DirectoryUrl: https://step-ca:9000/acme/acme/directory
+      SmallstepAcme__AccountEmail: acme@trustforge.lab
+      SmallstepAcme__AccountKeySecretRef: secret://file//run/trustforge/secrets/acme-account.pem
+      SmallstepAcme__RootCertificatePath: /run/trustforge/secrets/root_ca.crt
+      TechnitiumDns__BaseUrl: http://127.0.0.1:5380
+      TechnitiumDns__ApiTokenSecretRef: secret://file//run/trustforge/secrets/dns-api-token
+      TechnitiumDns__AllowedZones__0: trustforge.lab
+      TechnitiumDns__ResolverAddress: 127.0.0.1
+      TechnitiumDns__ResolverPort: "53"
+      DnsServer__Enabled: "true"
+      DnsServer__ConfigDirectory: /etc/trustforge/dns
+      DNS_SERVER_ADMIN_PASSWORD: ${LAB_DNS_ADMIN_PASSWORD:?Set LAB_DNS_ADMIN_PASSWORD in .env}
+    volumes:
+      - ./secrets:/run/trustforge/secrets:ro
+      - lab-artifacts:/var/lib/trustforge/artifacts
+      - lab-dns-config:/etc/trustforge/dns
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://127.0.0.1:5000/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  # Shares the app network namespace so http://localhost:8280 is a loopback issuer
+  # for the API (Development + AllowInsecureLoopback) and for host-side scripts alike.
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.8.2
+    command: ["start-dev", "--import-realm"]
+    network_mode: "service:trustforge"
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${LAB_OIDC_ADMIN_USER:?Set LAB_OIDC_ADMIN_USER in .env}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${LAB_OIDC_ADMIN_PASSWORD:?Set LAB_OIDC_ADMIN_PASSWORD in .env}
+      KC_HOSTNAME: http://localhost:${LAB_OIDC_PORT:-8280}
+      # Listen on the published port inside the shared netns so the API can reach
+      # the issuer at http://localhost:<port> without going through the host proxy.
+      KC_HTTP_PORT: ${LAB_OIDC_PORT:-8280}
+      KC_HTTP_ENABLED: "true"
+      TF_OIDC_DEV_USERNAME: ${LAB_OIDC_DEV_USERNAME:?Set LAB_OIDC_DEV_USERNAME in .env}
+      TF_OIDC_DEV_EMAIL: ${LAB_OIDC_DEV_EMAIL:?Set LAB_OIDC_DEV_EMAIL in .env}
+      TF_OIDC_DEV_PASSWORD: ${LAB_OIDC_DEV_PASSWORD:?Set LAB_OIDC_DEV_PASSWORD in .env}
+    volumes:
+      - ../../TrustForge.Api/keycloak:/opt/keycloak/data/import:ro
+    depends_on:
+      trustforge:
+        condition: service_started
+
+  postgres:
+    image: postgres:17-alpine
+    networks: [lab]
+    environment:
+      POSTGRES_DB: ${LAB_POSTGRES_DB:-trustforge_lab}
+      POSTGRES_USER: ${LAB_POSTGRES_USER:-trustforge}
+      POSTGRES_PASSWORD: ${LAB_POSTGRES_PASSWORD:?Set LAB_POSTGRES_PASSWORD in .env}
+    volumes:
+      - lab-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  step-ca:
+    image: smallstep/step-ca:${LAB_STEP_CA_TAG:-0.30.2}
+    hostname: step-ca
+    networks:
+      lab:
+        ipv4_address: ${LAB_SUBNET_PREFIX:-172.30.90}.20
+    # DNS-01 validation uses the system resolver; point it at the embedded Technitium server.
+    dns:
+      - ${LAB_SUBNET_PREFIX:-172.30.90}.10
+    ports:
+      - "127.0.0.1:9000:9000"
+    environment:
+      DOCKER_STEPCA_INIT_NAME: TrustForge Lab CA
+      DOCKER_STEPCA_INIT_DNS_NAMES: step-ca,localhost
+      DOCKER_STEPCA_INIT_PASSWORD: ${LAB_STEP_CA_PASSWORD:?Set LAB_STEP_CA_PASSWORD in .env}
+      DOCKER_STEPCA_INIT_ACME: "true"
+      DOCKER_STEPCA_INIT_DEPLOYMENT_TYPE: standalone
+    volumes:
+      - lab-stepca-data:/home/step
+    healthcheck:
+      test: ["CMD", "step", "ca", "health"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  target:
+    build:
+      context: ../..
+      dockerfile: dev/acme-lab/target/Dockerfile
+    image: trustforge-lab-target:local
+    hostname: target
+    networks:
+      lab:
+        ipv4_address: ${LAB_SUBNET_PREFIX:-172.30.90}.30
+    dns:
+      - ${LAB_SUBNET_PREFIX:-172.30.90}.10
+    ports:
+      - "127.0.0.1:${LAB_TARGET_SSH_PORT:-2222}:22"
+      - "127.0.0.1:${LAB_TARGET_TLS_PORT:-8443}:8443"
+    volumes:
+      - ./secrets/ssh/authorized_keys:/run/trustforge/authorized_keys:ro
+
+networks:
+  lab:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${LAB_SUBNET_PREFIX:-172.30.90}.0/24
+
+volumes:
+  lab-postgres-data:
+  lab-stepca-data:
+  lab-artifacts:
+  lab-dns-config:

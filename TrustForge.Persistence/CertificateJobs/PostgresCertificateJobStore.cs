@@ -171,14 +171,16 @@ public sealed class PostgresCertificateJobStore(IDbContextFactory<TrustForgeDbCo
 
         await using TrustForgeDbContext db = await contextFactory.CreateDbContextAsync(cancellationToken);
         await using IDbContextTransaction transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        // A nullable DateTimeOffset parameter used only in IS NOT NULL has no inferable SQL type (42P18); pass a typed bool instead.
+        bool finished = job.FinishedAt is not null;
         int changed = await db.Database.ExecuteSqlInterpolatedAsync($"""
             UPDATE certificate_jobs
             SET state = {job.State.ToString()}, version = {job.Version}, finished_at = {job.FinishedAt},
                 certificate_id = {job.CertificateId}, certificate_fingerprint = {job.CertificateFingerprint},
                 failure_stage = {job.FailureStage}, failure_summary = {job.FailureSummary},
-                worker_lease_owner = CASE WHEN {job.FinishedAt} IS NOT NULL THEN NULL ELSE worker_lease_owner END,
-                worker_lease_token = CASE WHEN {job.FinishedAt} IS NOT NULL THEN NULL ELSE worker_lease_token END,
-                worker_lease_expires_at = CASE WHEN {job.FinishedAt} IS NOT NULL THEN NULL ELSE worker_lease_expires_at END
+                worker_lease_owner = CASE WHEN {finished} THEN NULL ELSE worker_lease_owner END,
+                worker_lease_token = CASE WHEN {finished} THEN NULL ELSE worker_lease_token END,
+                worker_lease_expires_at = CASE WHEN {finished} THEN NULL ELSE worker_lease_expires_at END
             WHERE id = {job.Id} AND version = {expectedVersion}
               AND worker_lease_token = {leaseToken}
               AND worker_lease_expires_at > clock_timestamp()
@@ -212,6 +214,20 @@ public sealed class PostgresCertificateJobStore(IDbContextFactory<TrustForgeDbCo
               AND worker_lease_token = {leaseToken}
               AND worker_lease_expires_at > clock_timestamp()
               AND state IN ('Queued','Connecting','GeneratingCsr','CreatingOrder','AwaitingChallenge','Signing','Staging','Activating','Verifying')
+            """, cancellationToken);
+        return changed == 1;
+    }
+
+    public async Task<bool> TryAttachCertificateLeasedAsync(Guid jobId, long expectedVersion, Guid leaseToken, Guid certificateId, string fingerprint, CancellationToken cancellationToken = default)
+    {
+        await using TrustForgeDbContext db = await contextFactory.CreateDbContextAsync(cancellationToken);
+        int changed = await db.Database.ExecuteSqlInterpolatedAsync($"""
+            UPDATE certificate_jobs
+            SET certificate_id = {certificateId}, certificate_fingerprint = {fingerprint}
+            WHERE id = {jobId} AND version = {expectedVersion}
+              AND worker_lease_token = {leaseToken}
+              AND worker_lease_expires_at > clock_timestamp()
+              AND state = 'Signing'
             """, cancellationToken);
         return changed == 1;
     }

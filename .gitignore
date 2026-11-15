@@ -8,6 +8,7 @@
 *.sln.docstates
 .env.trustforge
 .env
+dev/acme-lab/secrets/
 
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs

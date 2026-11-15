@@ -110,18 +110,18 @@
 
 ### 实施项
 
-- [ ] 配置 `step-ca` ACME directory、信任链、ACME account key 与（若启用）EAB secret 引用。
-- [ ] 实现 ACME new-order、授权挑战、finalize CSR、下载和验证证书链的客户端流程。
-- [ ] 实现 DNS-01：生成 TXT 值、通过 Technitium API 限定区域写入、等待权威校验后完成 ACME 授权，并清理挑战记录。
-- [ ] 对 DNS 记录变更执行最小权限授权、冲突检测、超时清理和审计。
-- [ ] 证书下载后校验 issuer、SAN、EKU/KeyUsage、算法和有效期是否符合服务模板。
+- [x] 配置 `step-ca` ACME directory、信任链、ACME account key 与（若启用）EAB secret 引用。
+- [x] 实现 ACME new-order、授权挑战、finalize CSR、下载和验证证书链的客户端流程。
+- [x] 实现 DNS-01：生成 TXT 值、通过 Technitium API 限定区域写入、等待权威校验后完成 ACME 授权，并清理挑战记录。
+- [x] 对 DNS 记录变更执行最小权限授权、冲突检测、超时清理和审计。
+- [x] 证书下载后校验 issuer、SAN、EKU/KeyUsage、算法和有效期是否符合服务模板。
 - [ ] 单独设计吊销操作的 CA 管理通道；step-ca ACME Provisioner 不提供吊销能力。
 
 ### 完成条件
 
-- 手动任务能经 ACME+DNS-01 得到与目标私钥对应的证书。
-- 挑战记录能在成功、失败和任务恢复路径中安全清理。
-- ACME account key、EAB 凭据和目标私钥互相隔离，均不进入普通日志/数据库字段。
+- [x] 手动任务能经 ACME+DNS-01 得到与目标私钥对应的证书。
+- [x] 挑战记录能在成功、失败和任务恢复路径中安全清理。
+- [x] ACME account key、EAB 凭据和目标私钥互相隔离，均不进入普通日志/数据库字段。
 
 ## 阶段 5：SSH/SFTP Linux 部署与回滚
 
@@ -159,6 +159,6 @@
 
 ## 当前下一步
 
-阶段 3 Worker 基础已实现并通过 Release 构建：PostgreSQL 租约/安全领取、版本与 token 双重校验、崩溃恢复、心跳续租和退避重试。Worker 默认关闭；当前没有虚假的签发模拟器或生产处理器。下一步实现开发模拟处理器和 Pipeline 协议，然后依次接 Smallstep ACME、Technitium DNS-01、SSH 部署与回滚。
+阶段 4 已完成并在开发 ACME 实验室（`dev/acme-lab/`）通过端到端验证：真实 step-ca ACME + Technitium DNS-01 签发、成功/失败/恢复路径的挑战记录清理、密钥隔离、`AwaitingChallenge` 崩溃后的租约过期重领恢复演练，以及账户订单对账（日志确认复用）。协议与校验语义见 `CERTIFICATE-PIPELINE.md`，实验室用法见 `dev/acme-lab/README.md`。吊销 CA 管理通道仍未实现。
 
-Pipeline 协议、JSONB 恢复 checkpoint、ACME/DNS/SSH 窄接口以及 Development-only 模拟处理器已加入；模拟任务终态明确为 `Simulated`。协议细节见 `CERTIFICATE-PIPELINE.md`。真实 Smallstep ACME 适配器是下一项工作。
+阶段 5 的 SSH 部署器与 root-owned `trustforge-certctl` 助手已随阶段 4 提前实现（固定主机密钥指纹、窄 JSON 协议、原子切换/reload/health/回滚）；剩余：连接测试接口、部署版本记录与失败告警、暂存/回滚槽位按保留策略清理。阶段 3 的 outbox 项仍开放。下一步继续阶段 5 剩余项，然后进入阶段 6 自动续期。

@@ -5,6 +5,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using TrustForge.Core.CertificateJobs;
 using TrustForge.Core.ManagedServices;
+using TrustForge.Core.Security;
 using TrustForge.Persistence;
 using TrustForge.Api;
 
@@ -15,6 +16,13 @@ if (string.IsNullOrWhiteSpace(connectionString))
 
 builder.Services.AddTrustForgePersistence(connectionString);
 builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.AddSingleton<ISecretResolver, EnvironmentSecretResolver>();
+builder.Services.Configure<SmallstepAcmeOptions>(builder.Configuration.GetSection("SmallstepAcme"));
+builder.Services.AddScoped<ICertificateIssuer, SmallstepCertificateIssuer>();
+builder.Services.Configure<TechnitiumDnsOptions>(builder.Configuration.GetSection("TechnitiumDns"));
+builder.Services.AddHttpClient("TechnitiumDns", client => client.Timeout = TimeSpan.FromSeconds(15));
+builder.Services.AddScoped<IDnsChallengeProvider, TechnitiumDnsChallengeProvider>();
+builder.Services.AddScoped<ILinuxCertificateDeployer, SshLinuxCertificateDeployer>();
 builder.Services.AddScoped<CertificateJobCoordinator>();
 builder.Services.Configure<CertificateJobWorkerOptions>(builder.Configuration.GetSection("CertificateJobs:Worker"));
 bool runMigrations = args.Contains("--migrate", StringComparer.Ordinal);
@@ -27,8 +35,18 @@ if (simulationEnabled && !runMigrations)
 }
 if ((builder.Configuration.GetValue<bool>("CertificateJobs:Worker:Enabled") || simulationEnabled) && !runMigrations)
 {
+    if (builder.Configuration.GetValue<bool>("CertificateJobs:Worker:Enabled") && !simulationEnabled)
+    {
+        string artifactDirectory = builder.Configuration["CertificateJobs:Artifacts:Directory"]
+            ?? "/var/lib/trustforge/artifacts";
+        if (!Path.IsPathFullyQualified(artifactDirectory))
+            throw new InvalidOperationException("CertificateJobs:Artifacts:Directory must be an absolute path on the persistent application volume.");
+        builder.Services.AddSingleton<ICertificateArtifactStore>(new FileCertificateArtifactStore(artifactDirectory));
+        builder.Services.AddSingleton<IssuedCertificateValidator>();
+        builder.Services.AddScoped<ICertificateJobProcessor, CertificatePipelineProcessor>();
+    }
     if (!builder.Services.Any(descriptor => descriptor.ServiceType == typeof(ICertificateJobProcessor)))
-        throw new InvalidOperationException("CertificateJobs:Worker:Enabled requires an ICertificateJobProcessor implementation.");
+        throw new InvalidOperationException("The certificate job worker requires an ICertificateJobProcessor implementation.");
     builder.Services.AddHostedService<CertificateJobWorker>();
 }
 builder.Services.AddHostedService<DnsServerHostedService>();
@@ -232,8 +250,12 @@ internal sealed record CreateManagedServiceRequest(
         if (FileGroup is not null && !IsLinuxAccountName(FileGroup.Trim()))
             AddError(validationErrors, nameof(FileGroup), "File group must be a Linux group name.");
         if (FileMode is not null && !System.Text.RegularExpressions.Regex.IsMatch(FileMode.Trim(), "^0?[0-7]{3}$", System.Text.RegularExpressions.RegexOptions.CultureInvariant))
-            AddError(validationErrors, nameof(FileMode), "File mode must be an octal permission such as 0640.");
+            AddError(validationErrors, nameof(FileMode), "File mode must be an octal permission such as 0600.");
+        else if (FileMode is not null && ((Convert.ToInt32(FileMode.Trim(), 8) & ~0x180) != 0 || (Convert.ToInt32(FileMode.Trim(), 8) & 0x100) == 0))
+            AddError(validationErrors, nameof(FileMode), "Private-key mode must grant owner read access only, such as 0400 or 0600.");
         ValidateIdentifier(RemoteHelperId, nameof(RemoteHelperId), validationErrors);
+        if (RemoteHelperId is not null && !string.Equals(RemoteHelperId.Trim(), "trustforge-certctl-v1", StringComparison.Ordinal))
+            AddError(validationErrors, nameof(RemoteHelperId), "Supported remote helper identifier is trustforge-certctl-v1.");
         ValidateIdentifier(ReloadActionId, nameof(ReloadActionId), validationErrors);
         ValidateIdentifier(HealthCheckId, nameof(HealthCheckId), validationErrors);
 

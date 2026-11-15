@@ -16,4 +16,5 @@ public interface ICertificateJobStore
     Task<bool> ReleaseLeaseAsync(Guid jobId, Guid leaseToken, TimeSpan retryDelay, CancellationToken cancellationToken = default);
     Task<bool> TryUpdateLeasedAsync(CertificateJob job, long expectedVersion, Guid leaseToken, CancellationToken cancellationToken = default);
     Task<bool> TryUpdateCheckpointLeasedAsync(Guid jobId, long expectedVersion, Guid leaseToken, CertificateJobCheckpoint checkpoint, CancellationToken cancellationToken = default);
+    Task<bool> TryAttachCertificateLeasedAsync(Guid jobId, long expectedVersion, Guid leaseToken, Guid certificateId, string fingerprint, CancellationToken cancellationToken = default);
 }
