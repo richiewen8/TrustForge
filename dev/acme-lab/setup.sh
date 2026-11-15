@@ -60,7 +60,8 @@ if [ ! -f secrets/ssh/id_ed25519 ]; then
 fi
 
 echo "== Starting trustforge and keycloak =="
-compose up -d trustforge keycloak
+# --build keeps the app image in sync with the working tree; a stale image would run old pipeline code.
+compose up -d --build trustforge keycloak
 wait_for "API readiness" 90 curl -fsS "$API/health/ready"
 wait_for "Keycloak realm" 90 curl -fsS "$OIDC/realms/trustforge-dev/.well-known/openid-configuration"
 

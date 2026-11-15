@@ -37,7 +37,9 @@ The referenced executables and their configuration must be root-owned and non-wr
 }
 ```
 
-The three paths must share the same `current` parent. Prepare the parent as an administrator-controlled symlink, initially pointing to the current certificate release (or leave it absent for a first install). The helper stages each release in `/var/lib/trustforge/releases`, atomically swaps the `current` symlink, remembers its previous target, reloads the registered action, verifies the active certificate fingerprint and health action, and can restore the prior symlink and reload the previous release.
+The three paths must share the same `current` parent. Prepare the parent as an administrator-controlled symlink, initially pointing to the current certificate release (or leave it absent for a first install). The helper stages each release in `/var/lib/trustforge/releases`, atomically swaps the `current` symlink, remembers its previous target, reloads the registered action, verifies the active certificate fingerprint, file ownership/permissions and health action, and can restore the prior symlink and reload the previous release.
+
+Supported operations (JSON `operation` field): `validate`, `generate-csr`, `stage`, `activate`, `verify`, `rollback`, `prune`. `verify` re-checks that the active certificate and chain are mode `0644` and the private key matches the registered `fileMode`, all owned by the registered `fileOwner`:`fileGroup`, before running the health action. `prune` enforces the retention policy: with `retainedReleases` (1–50) it deletes old release directories and their job key directories under the service's own roots only, never the active `current` target, never the recorded rollback slot, and always the newest `retainedReleases` releases. The API calls `prune` after a successful verification; a prune failure is logged and does not roll back the deployment.
 
 Create a dedicated SSH account and restrict sudo to this executable:
 

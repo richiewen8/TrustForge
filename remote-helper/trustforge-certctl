@@ -1,12 +1,15 @@
 #!/usr/bin/python3
 """Root-owned JSON stdin helper for TrustForge Linux certificate activation."""
 import base64
+import grp
 import hashlib
 import ipaddress
 import json
 import os
+import pwd
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -157,6 +160,51 @@ def stage(request, config, destinations):
     return release_id
 
 
+def check_permissions(current, destinations, config):
+    owner = pwd.getpwnam(config["fileOwner"]).pw_uid
+    group = grp.getgrnam(config["fileGroup"]).gr_gid
+    expected = (
+        (destinations[0].name, 0o644),
+        (destinations[1].name, 0o644),
+        (destinations[2].name, int(config["fileMode"], 8)),
+    )
+    for name, mode in expected:
+        info = (current / name).stat()
+        if info.st_uid != owner or info.st_gid != group or stat.S_IMODE(info.st_mode) != mode:
+            raise HelperError(f"active file '{name}' ownership or permissions do not match the service registration")
+
+
+def prune(request, service_id, current):
+    keep = request.get("retainedReleases")
+    if not isinstance(keep, int) or isinstance(keep, bool) or not 1 <= keep <= 50:
+        raise HelperError("retainedReleases must be an integer between 1 and 50")
+    releases_root = RELEASE_ROOT / service_id
+    if not releases_root.is_dir():
+        return []
+    # The active release and the recorded rollback slot must survive any retention policy.
+    protected = set()
+    if current.is_symlink():
+        protected.add(Path(os.readlink(current)).name)
+    state_file = STATE_ROOT / f"{service_id}.json"
+    if state_file.exists():
+        previous = load(state_file).get("previousTarget")
+        if previous:
+            protected.add(Path(previous).name)
+    candidates = [entry for entry in releases_root.iterdir() if entry.is_dir() and GUID_RE.fullmatch(entry.name)]
+    candidates.sort(key=lambda entry: entry.stat().st_mtime, reverse=True)
+    protected.update(entry.name for entry in candidates[:keep])
+    pruned = []
+    for entry in candidates:
+        if entry.name in protected:
+            continue
+        shutil.rmtree(entry)
+        job = JOB_ROOT / service_id / entry.name
+        if job.is_dir():
+            shutil.rmtree(job)
+        pruned.append(entry.name)
+    return pruned
+
+
 def set_link(current, target):
     # First activation: the destination parent may not exist yet (service_config allows this).
     current.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
@@ -189,6 +237,8 @@ def main(request):
         return {"success": True, "csrPem": generate_csr(request)}
     if operation == "stage":
         return {"success": True, "releaseId": stage(request, config, destinations)}
+    if operation == "prune":
+        return {"success": True, "prunedReleaseIds": prune(request, service_id, current)}
 
     release_id = request.get("releaseId", "")
     if not GUID_RE.fullmatch(release_id):
@@ -220,6 +270,7 @@ def main(request):
         actual = fingerprint(current / destinations[0].name)
         if actual != request.get("expectedFingerprint", "").upper():
             raise HelperError("active certificate fingerprint does not match the issued certificate")
+        check_permissions(current, destinations, config)
         action(config["healthCheckId"], registry, service_id)
         return {"success": True}
     if operation == "rollback":

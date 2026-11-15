@@ -6,6 +6,7 @@ namespace TrustForge.Api;
 public sealed class CertificateJobWorker(
     IServiceScopeFactory scopeFactory,
     IOptions<CertificateJobWorkerOptions> options,
+    IJobSubmissionChannel submissionChannel,
     ILogger<CertificateJobWorker> logger) : BackgroundService
 {
     private readonly CertificateJobWorkerOptions _options = options.Value;
@@ -22,7 +23,10 @@ public sealed class CertificateJobWorker(
                 LeasedCertificateJob? leased = await store.TryClaimNextAsync(_owner, _options.LeaseDuration, stoppingToken);
                 if (leased is null)
                 {
-                    await Task.Delay(_options.PollInterval, stoppingToken);
+                    if (_options.NotificationEnabled)
+                        await submissionChannel.WaitForSubmissionAsync(_options.PollInterval, stoppingToken);
+                    else
+                        await Task.Delay(_options.PollInterval, stoppingToken);
                     continue;
                 }
 

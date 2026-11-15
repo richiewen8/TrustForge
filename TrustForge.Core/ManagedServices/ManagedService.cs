@@ -20,6 +20,8 @@ public sealed record ManagedService(
     string RemoteHelperId,
     string ReloadActionId,
     string HealthCheckId,
+    bool RenewalEnabled,
+    TimeSpan RenewalLeadTime,
     bool Enabled,
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt);

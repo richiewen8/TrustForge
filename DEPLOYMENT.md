@@ -39,9 +39,13 @@ The certificate worker is disabled by default. To run the real issuance/deployme
 - `TRUSTFORGE_DNS_CHALLENGE_ZONE_0`: the zone allowed for `_acme-challenge` records. Challenges outside the configured zones are rejected.
 - `TRUSTFORGE_DNS_CHALLENGE_RESOLVER_ADDRESS`/`_PORT`: the resolver used to confirm TXT propagation before ACME validation; normally the embedded server itself.
 
+The worker wakes on a transactional PostgreSQL `NOTIFY` sent in the same transaction as each job insert; `TRUSTFORGE_WORKER_NOTIFICATION_ENABLED` (default `true`) controls this, with `TRUSTFORGE_WORKER_POLL_INTERVAL` polling as the loss-safe fallback. The durable job row is the queue, so a missed notification only adds latency, never loses a job. See [CERTIFICATE-PIPELINE.md](CERTIFICATE-PIPELINE.md).
+
 step-ca must resolve the challenge names through this Technitium instance (point the CA's system resolver at it). Each managed Linux target needs the root-owned `trustforge-certctl` helper, root-managed service/action registrations and a dedicated SSH account restricted to that helper; see [remote-helper/README.md](remote-helper/README.md). Issued public certificate material is stored in the `trustforge-certificate-artifacts` volume; private keys are generated and remain on the targets.
 
 For an isolated end-to-end rehearsal of this configuration, use the disposable lab in [dev/acme-lab/README.md](dev/acme-lab/README.md).
+
+For day-two operations — backup/restore, key rotation, schema upgrades, disaster recovery and monitoring — see [OPERATIONS.md](OPERATIONS.md). For production hardening options (HSM/KMS, step-ca high availability, multi-instance TrustForge) see [HSM-KMS-HA-EVALUATION.md](HSM-KMS-HA-EVALUATION.md).
 
 ## Open the project
 

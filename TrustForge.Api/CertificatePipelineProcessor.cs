@@ -1,4 +1,6 @@
+using Microsoft.Extensions.Options;
 using TrustForge.Core.CertificateJobs;
+using TrustForge.Core.DeploymentVersions;
 using TrustForge.Core.ManagedServices;
 
 namespace TrustForge.Api;
@@ -10,7 +12,9 @@ public sealed class CertificatePipelineProcessor(
     ICertificateIssuer issuer,
     IDnsChallengeProvider dns,
     ICertificateArtifactStore artifacts,
+    IDeploymentVersionStore versions,
     IssuedCertificateValidator validator,
+    IOptions<CertificateDeploymentOptions> deploymentOptions,
     ILogger<CertificatePipelineProcessor> logger) : ICertificateJobProcessor
 {
     private readonly string _actor = $"pipeline:{Environment.MachineName}";
@@ -66,12 +70,16 @@ public sealed class CertificatePipelineProcessor(
                     service = await RequireServiceAsync(job.ServiceId, cancellationToken);
                     IssuedCertificateBundle stagedCertificate = await artifacts.GetAsync(job.Id, cancellationToken);
                     string release = checkpoint.DeploymentReleaseId ?? await deployer.StageAsync(service, job.Id, stagedCertificate, cancellationToken);
+                    if (!await versions.RecordStagedAsync(job, leased.Lease.Token, release, stagedCertificate.NotAfter, cancellationToken))
+                        throw new InvalidOperationException("The staged deployment version could not be recorded under the current lease.");
                     await SaveAsync(leased, coordinator, checkpoint with { DeploymentReleaseId = release }, cancellationToken);
                     await AdvanceAsync(leased, coordinator, CertificateJobState.Activating, cancellationToken);
                     break;
                 case CertificateJobState.Activating:
                     service = await RequireServiceAsync(job.ServiceId, cancellationToken);
                     string? previousRelease = await deployer.ActivateAsync(service, job.Id, Required(checkpoint.DeploymentReleaseId, "Deployment release checkpoint is missing."), cancellationToken);
+                    if (!await versions.MarkActiveAsync(job.Id, leased.Lease.Token, previousRelease, cancellationToken))
+                        throw new InvalidOperationException("The deployment activation could not be recorded under the current lease.");
                     await SaveAsync(leased, coordinator, checkpoint with { PreviousReleaseId = previousRelease }, cancellationToken);
                     await AdvanceAsync(leased, coordinator, CertificateJobState.Verifying, cancellationToken);
                     break;
@@ -80,6 +88,17 @@ public sealed class CertificatePipelineProcessor(
                     await deployer.VerifyAsync(service, job.Id,
                         Required(checkpoint.DeploymentReleaseId, "Deployment release checkpoint is missing."),
                         Required(job.CertificateFingerprint, "Issued certificate fingerprint is missing."), cancellationToken);
+                    if (!await versions.MarkVerifiedAsync(job.Id, leased.Lease.Token, cancellationToken))
+                        throw new InvalidOperationException("The deployment verification could not be recorded under the current lease.");
+                    try
+                    {
+                        await deployer.PruneReleasesAsync(service, deploymentOptions.Value.RetainedReleases, cancellationToken);
+                    }
+                    catch (Exception exception) when (exception is not OperationCanceledException)
+                    {
+                        // Retention cleanup is best-effort: a prune failure must not roll back a verified deployment.
+                        logger.LogWarning(exception, "Deployment retention cleanup failed for service {ServiceId}; the active release is untouched.", service.Id);
+                    }
                     await AdvanceAsync(leased, coordinator, CertificateJobState.Succeeded, cancellationToken);
                     break;
                 default:
@@ -160,6 +179,8 @@ public sealed class CertificatePipelineProcessor(
                 if (service is null || string.IsNullOrWhiteSpace(job.Checkpoint.DeploymentReleaseId))
                     throw new InvalidOperationException("No staged release ID is available for rollback.");
                 string? previous = await deployer.RollbackAsync(service, job.Id, job.Checkpoint.DeploymentReleaseId, cancellationToken);
+                if (!await versions.MarkRolledBackAsync(job.Id, leased.Lease.Token, previous, cancellationToken))
+                    throw new InvalidOperationException("The deployment rollback could not be recorded under the current lease.");
                 CertificateJobCheckpoint recovered = job.Checkpoint with { PreviousReleaseId = previous };
                 await SaveAsync(leased, coordinator, recovered, cancellationToken);
                 await coordinator.TransitionLeasedAsync(job.Id, job.Version, leased.Lease.Token,
@@ -169,6 +190,8 @@ public sealed class CertificatePipelineProcessor(
             {
                 string rollbackSummary = $"{summary}; rollback failed: {rollbackException.Message}";
                 if (rollbackSummary.Length > 1000) rollbackSummary = rollbackSummary[..1000];
+                if (!await versions.MarkRollbackFailedAsync(job.Id, leased.Lease.Token, cancellationToken))
+                    logger.LogWarning("The rollback-failed deployment version for job {JobId} could not be recorded under the current lease.", job.Id);
                 await coordinator.TransitionLeasedAsync(job.Id, job.Version, leased.Lease.Token,
                     CertificateJobState.RollbackFailed, _actor, job.State.ToString(), rollbackSummary, cancellationToken);
             }

@@ -51,6 +51,8 @@ public sealed class PostgresManagedServiceStore(IDbContextFactory<TrustForgeDbCo
         RemoteHelperId = service.RemoteHelperId,
         ReloadActionId = service.ReloadActionId,
         HealthCheckId = service.HealthCheckId,
+        RenewalEnabled = service.RenewalEnabled,
+        RenewalLeadTime = service.RenewalLeadTime,
         Enabled = service.Enabled,
         CreatedAt = service.CreatedAt,
         UpdatedAt = service.UpdatedAt
@@ -61,7 +63,7 @@ public sealed class PostgresManagedServiceStore(IDbContextFactory<TrustForgeDbCo
         record.HostKeyFingerprint, record.SshCredentialRef, record.ProfileId, record.Sans,
         record.CertificatePath, record.ChainPath, record.PrivateKeyPath, record.FileOwner,
         record.FileGroup, record.FileMode, record.RemoteHelperId, record.ReloadActionId,
-        record.HealthCheckId, record.Enabled, record.CreatedAt, record.UpdatedAt);
+        record.HealthCheckId, record.RenewalEnabled, record.RenewalLeadTime, record.Enabled, record.CreatedAt, record.UpdatedAt);
 
     private static bool IsUniqueConstraintViolation(DbUpdateException exception)
     {

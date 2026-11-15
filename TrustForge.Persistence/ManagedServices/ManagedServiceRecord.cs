@@ -21,6 +21,8 @@ internal sealed class ManagedServiceRecord
     public required string RemoteHelperId { get; set; }
     public required string ReloadActionId { get; set; }
     public required string HealthCheckId { get; set; }
+    public bool RenewalEnabled { get; set; }
+    public TimeSpan RenewalLeadTime { get; set; }
     public bool Enabled { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }

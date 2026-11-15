@@ -61,4 +61,6 @@ public interface ILinuxCertificateDeployer
     Task VerifyAsync(ManagedService service, Guid jobId, string releaseId, string expectedFingerprint, CancellationToken cancellationToken = default);
 
     Task<string?> RollbackAsync(ManagedService service, Guid jobId, string releaseId, CancellationToken cancellationToken = default);
+
+    Task PruneReleasesAsync(ManagedService service, int retainedReleases, CancellationToken cancellationToken = default);
 }

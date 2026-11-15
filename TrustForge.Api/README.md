@@ -16,11 +16,21 @@ The same Compose file provides a local-only Keycloak realm. Start the developmen
 
 ## Certificate job worker
 
-PostgreSQL-backed claiming and lease recovery are implemented. The worker is intentionally disabled by default (`CertificateJobs:Worker:Enabled=false`, or `TRUSTFORGE_WORKER_ENABLED=false` in Compose). When enabled in production it uses the real pipeline processor: Smallstep ACME, Technitium DNS-01, SSH.NET with pinned host keys, Linux target-side CSR/private-key generation, staged release activation, health verification and rollback. The worker uses a renewable two-minute fencing-token lease by default and retries processor errors with bounded exponential delay.
+PostgreSQL-backed claiming and lease recovery are implemented. The worker is intentionally disabled by default (`CertificateJobs:Worker:Enabled=false`, or `TRUSTFORGE_WORKER_ENABLED=false` in Compose). When enabled in production it uses the real pipeline processor: Smallstep ACME, Technitium DNS-01, SSH.NET with pinned host keys, Linux target-side CSR/private-key generation, staged release activation, health verification and rollback. The worker uses a renewable two-minute fencing-token lease by default and retries processor errors with bounded exponential delay. The durable `certificate_jobs` row is the queue (an outbox equivalent); each job insert issues a transactional PostgreSQL `NOTIFY` (`trustforge_job_submitted`) and a dedicated `LISTEN` connection wakes the worker at once. `CertificateJobs:Worker:NotificationEnabled` (default `true`, Compose `TRUSTFORGE_WORKER_NOTIFICATION_ENABLED`) toggles this wake; `PollInterval` polling remains the loss-safe fallback, so a missed notification only costs latency, never correctness.
 
 For isolated state-machine development, set `ASPNETCORE_ENVIRONMENT=Development` and `CertificateJobs:Simulation:Enabled=true` (Compose: `TRUSTFORGE_SIMULATION_ENABLED=true`). The simulation advances each durable stage and ends at `Simulated`; it does not issue a certificate or connect to managed hosts. Production refuses this setting. See [CERTIFICATE-PIPELINE.md](../CERTIFICATE-PIPELINE.md) for recovery semantics and [remote-helper/README.md](../remote-helper/README.md) for Linux host setup.
 
 Real execution requires Smallstep ACME and Technitium settings from `.env.trustforge.example`, an `ISecretResolver` reference for the ACME account key, DNS API token and per-service SSH credential JSON, plus a persistent artifact volume. `SmallstepAcme:RootCertificatePath` is required for the real pipeline: issued certificates are validated against that CA root (chain, fingerprint, CSR public-key correspondence, exact SAN match, server-auth EKU, key strength and validity window) before anything is persisted or deployed. `SmallstepAcme:MaximumCertificateLifetime` (default 90 days) bounds the accepted certificate lifetime until certificate profiles exist. The SSH account's public key must be registered on each target and its sudo rule limited to `/usr/local/sbin/trustforge-certctl`. Install the helper and root-owned service/action registrations before registering the service in TrustForge.
+
+### Renewal, expiry reminders and alerts
+
+Three background workers run alongside the pipeline worker when it is enabled:
+
+- `RenewalSchedulerWorker` (`CertificateJobs:Renewal`): scans enabled services whose active certificate enters the per-service `renewalLeadTime` window and creates one renewal job per service. `ScanInterval` (default 5 minutes) and `MinimumRenewalInterval` (default 1 hour) plus the fingerprint idempotency key `renewal-{fingerprint}` prevent re-issuing on every scan. A database-level partial unique index allows only one active job per service.
+- `ExpiryReminderWorker` (`CertificateJobs:Expiry`): scans active certificates whose `certificateNotAfter` falls within `ReminderWindow` (default 7 days) every `ScanInterval` (default 1 hour) and raises a `CertificateExpiring` Warning alert. Reminders are independent of the renewal policy (they fire even for services with `renewalEnabled=false`) and are deduplicated per service+fingerprint via `dedupeKey`, so each certificate produces at most one reminder.
+- `CertificateAlertDeliveryWorker` (`CertificateJobs:Alerts`): delivers pending alerts to `WebhookUrl` (when unset, alerts are emitted as structured log events only). `PollInterval` (default 5 seconds), `VisibilityTimeout` (default 1 minute) and `MaxAttempts` (default 5) control delivery retries.
+
+Durations use unambiguous .NET `TimeSpan` format: `25:00:00` parses as 25 **days**, so use `1.01:00:00` for 25 hours. See [OPERATIONS.md](../OPERATIONS.md) for backup/restore, key rotation and monitoring runbooks.
 
 ### End-to-end ACME lab
 
@@ -55,9 +65,13 @@ With Keycloak running, configure `ASPNETCORE_ENVIRONMENT=Development`, `Authenti
 
 ## Endpoints
 
-- `POST /api/v1/services`: register a Linux service and constrained PEM/SSH deployment metadata.
+- `POST /api/v1/services`: register a Linux service and constrained PEM/SSH deployment metadata. Optional `renewalEnabled` (default false) and `renewalLeadTime` (a positive duration ≤ 365 days, e.g. `1.01:00:00` for 25 hours; default 30 days) control automatic renewal.
 - `GET /api/v1/services/{id}`: read a registered service.
-- `POST /api/v1/services/{id}/certificate-jobs`: create an idempotent manual issuance job; requires `Idempotency-Key`.
+- `POST /api/v1/services/{id}/connection-test`: connect with the pinned SSH host key and run the remote helper's validate operation; returns `{ "success": true }` or `{ "success": false, "error": ... }`. A host-key fingerprint mismatch aborts before any remote operation.
+- `POST /api/v1/services/{id}/certificate-jobs`: create an idempotent manual issuance job; requires `Idempotency-Key`. Returns 409 `service_job_active` if the service already has an active job (database-level one-active-job-per-service guard).
+- `GET /api/v1/services/{id}/deployment-versions`: per-service deployment history (staged/active/superseded/rolled-back releases, fingerprints, health and verification timestamps, and the issued certificate's `certificateNotAfter`); optional `limit`.
+- `GET /api/v1/certificate-alerts`: durable alerts and their delivery state; optional `serviceId`, `deliveryState` (`Pending`/`Delivered`/`Failed`) and `limit`. Includes terminal job-failure alerts (`JobFailed`/`DeploymentRolledBack`/`RollbackFailed`, which carry a `jobId`) and expiry reminders (`CertificateExpiring`, which carry no `jobId` but a `dedupeKey` of the form `expiring:{serviceId}:{fingerprint}`).
+- `GET /api/v1/audit/export`: read-only audit bundle `{ generatedAt, filters, jobs, deploymentVersions, alerts }` for export/archival; optional `serviceId`, `from`, `to` (ISO-8601 timestamps; `from` must not be later than `to`) and `limit` (default 200, applied per section). Enums serialize as strings. Requires a reader role (`PlatformAdmin`, `CertificateOperator` or `Auditor`).
 - `GET /api/v1/certificate-jobs/{id}`: read job state and its transition history.
 - `GET /health/live`, `GET /health/ready`: liveness and PostgreSQL/schema readiness.
 

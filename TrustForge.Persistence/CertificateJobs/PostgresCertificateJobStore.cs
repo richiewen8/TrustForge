@@ -2,7 +2,9 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
 using Npgsql;
 using System.Text.Json;
+using TrustForge.Core.CertificateAlerts;
 using TrustForge.Core.CertificateJobs;
+using TrustForge.Persistence.CertificateAlerts;
 
 namespace TrustForge.Persistence.CertificateJobs;
 
@@ -37,19 +39,31 @@ public sealed class PostgresCertificateJobStore(IDbContextFactory<TrustForgeDbCo
     public async Task<bool> TryAddAsync(CertificateJob job, CancellationToken cancellationToken = default)
     {
         await using TrustForgeDbContext db = await contextFactory.CreateDbContextAsync(cancellationToken);
+        await using IDbContextTransaction transaction = await db.Database.BeginTransactionAsync(cancellationToken);
         db.CertificateJobs.Add(ToRecord(job));
         try
         {
             await db.SaveChangesAsync(cancellationToken);
-            return true;
         }
         catch (DbUpdateException exception) when (IsUniqueConstraintViolation(exception))
         {
+            if (HasConstraint(exception, "ux_certificate_jobs_active_service"))
+                throw new CertificateJobActiveConflictException(job.ServiceId);
             return false;
         }
+
+        // Transactional NOTIFY: listeners wake only on commit, so submission and wake are atomic; polling stays the fallback.
+        await using (NpgsqlCommand command = (NpgsqlCommand)db.Database.GetDbConnection().CreateCommand())
+        {
+            command.Transaction = (NpgsqlTransaction)transaction.GetDbTransaction();
+            command.CommandText = $"NOTIFY {PostgresJobSubmissionChannel.SubmissionChannelName}";
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+        await transaction.CommitAsync(cancellationToken);
+        return true;
     }
 
-    public async Task<bool> TryUpdateAsync(CertificateJob job, long expectedVersion, CancellationToken cancellationToken = default)
+    public async Task<bool> TryUpdateAsync(CertificateJob job, long expectedVersion, CertificateAlert? alert = null, CancellationToken cancellationToken = default)
     {
         if (job.Version != expectedVersion + 1 || job.Transitions.Count == 0 || job.Transitions[^1].Version != job.Version)
             throw new InvalidOperationException("A persisted update must contain exactly one new versioned transition.");
@@ -68,6 +82,8 @@ public sealed class PostgresCertificateJobStore(IDbContextFactory<TrustForgeDbCo
         entry.Property(item => item.ExecutionCheckpoint).IsModified = false;
 
         db.CertificateJobTransitions.Add(ToRecord(job.Id, job.Transitions[^1]));
+        if (alert is not null)
+            db.CertificateAlerts.Add(ToRecord(alert));
         try
         {
             await db.SaveChangesAsync(cancellationToken);
@@ -164,7 +180,7 @@ public sealed class PostgresCertificateJobStore(IDbContextFactory<TrustForgeDbCo
         return changed == 1;
     }
 
-    public async Task<bool> TryUpdateLeasedAsync(CertificateJob job, long expectedVersion, Guid leaseToken, CancellationToken cancellationToken = default)
+    public async Task<bool> TryUpdateLeasedAsync(CertificateJob job, long expectedVersion, Guid leaseToken, CertificateAlert? alert = null, CancellationToken cancellationToken = default)
     {
         if (job.Version != expectedVersion + 1 || job.Transitions.Count == 0 || job.Transitions[^1].Version != job.Version)
             throw new InvalidOperationException("A persisted update must contain exactly one new versioned transition.");
@@ -189,6 +205,8 @@ public sealed class PostgresCertificateJobStore(IDbContextFactory<TrustForgeDbCo
             return false;
 
         db.CertificateJobTransitions.Add(ToRecord(job.Id, job.Transitions[^1]));
+        if (alert is not null)
+            db.CertificateAlerts.Add(ToRecord(alert));
         await db.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
         return true;
@@ -232,11 +250,41 @@ public sealed class PostgresCertificateJobStore(IDbContextFactory<TrustForgeDbCo
         return changed == 1;
     }
 
+    public async Task<IReadOnlyList<CertificateJob>> ListAsync(Guid? serviceId, DateTimeOffset? from, DateTimeOffset? to, int limit, CancellationToken cancellationToken = default)
+    {
+        limit = Math.Clamp(limit, 1, 200);
+        await using TrustForgeDbContext db = await contextFactory.CreateDbContextAsync(cancellationToken);
+        IQueryable<CertificateJobRecord> query = db.CertificateJobs.AsNoTracking().Include(job => job.Transitions);
+        if (serviceId is not null)
+            query = query.Where(job => job.ServiceId == serviceId);
+        if (from is not null)
+            query = query.Where(job => job.CreatedAt >= from);
+        if (to is not null)
+            query = query.Where(job => job.CreatedAt <= to);
+        List<CertificateJobRecord> records = await query
+            .OrderByDescending(job => job.CreatedAt)
+            .ThenByDescending(job => job.Id)
+            .Take(limit)
+            .ToListAsync(cancellationToken);
+        return records.Select(ToDomain).ToArray();
+    }
+
     private static bool IsUniqueConstraintViolation(DbUpdateException exception)
     {
         for (Exception? current = exception; current is not null; current = current.InnerException)
         {
             if (current is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation })
+                return true;
+        }
+
+        return false;
+    }
+
+    private static bool HasConstraint(DbUpdateException exception, string constraintName)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is PostgresException postgres && postgres.ConstraintName == constraintName)
                 return true;
         }
 
@@ -266,6 +314,24 @@ public sealed class PostgresCertificateJobStore(IDbContextFactory<TrustForgeDbCo
             record.Transitions.AddRange(job.Transitions.Select(transition => ToRecord(job.Id, transition)));
         return record;
     }
+
+    private static CertificateAlertRecord ToRecord(CertificateAlert alert) => new()
+    {
+        Id = alert.Id,
+        JobId = alert.JobId,
+        ServiceId = alert.ServiceId,
+        Kind = alert.Kind.ToString(),
+        Severity = alert.Severity.ToString(),
+        Stage = alert.Stage,
+        Summary = alert.Summary,
+        OccurredAt = alert.OccurredAt,
+        DeliveryState = alert.DeliveryState.ToString(),
+        AttemptCount = alert.AttemptCount,
+        NextAttemptAt = alert.NextAttemptAt,
+        DeliveredAt = alert.DeliveredAt,
+        LastError = alert.LastError,
+        DedupeKey = alert.DedupeKey
+    };
 
     private static CertificateJobTransitionRecord ToRecord(Guid jobId, CertificateJobTransition transition) => new()
     {

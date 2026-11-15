@@ -1,3 +1,5 @@
+using TrustForge.Core.CertificateAlerts;
+
 namespace TrustForge.Core.CertificateJobs;
 
 /// <summary>Coordinates durable job creation and guarded transitions.</summary>
@@ -39,7 +41,8 @@ public sealed class CertificateJobCoordinator(ICertificateJobStore store, TimePr
 
         long storedVersion = job.Version;
         job.TransitionTo(nextState, actor, timeProvider.GetUtcNow(), failureStage, failureSummary);
-        if (!await store.TryUpdateAsync(job, storedVersion, cancellationToken))
+        CertificateAlert? alert = CertificateAlert.ForTerminalFailure(job, job.Transitions[^1].OccurredAt);
+        if (!await store.TryUpdateAsync(job, storedVersion, alert, cancellationToken))
             throw new CertificateJobConcurrencyException(jobId, expectedVersion, null);
         return job;
     }
@@ -61,7 +64,8 @@ public sealed class CertificateJobCoordinator(ICertificateJobStore store, TimePr
 
         long storedVersion = job.Version;
         job.TransitionTo(nextState, actor, timeProvider.GetUtcNow(), failureStage, failureSummary);
-        if (!await store.TryUpdateLeasedAsync(job, storedVersion, leaseToken, cancellationToken))
+        CertificateAlert? alert = CertificateAlert.ForTerminalFailure(job, job.Transitions[^1].OccurredAt);
+        if (!await store.TryUpdateLeasedAsync(job, storedVersion, leaseToken, alert, cancellationToken))
             throw new CertificateJobConcurrencyException(jobId, expectedVersion, null);
         return job;
     }

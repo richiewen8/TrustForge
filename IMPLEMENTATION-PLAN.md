@@ -36,7 +36,7 @@
 - [x] 实现 `ICertificateJobStore`：按 ID 查询、按幂等作用域查询、原子创建和乐观并发更新。
 - [x] 定义初始数据库迁移、模型快照和初始化说明；连接字符串由宿主从安全配置/秘密管理来源传入，不写入仓库。
 - [x] 就绪端点在数据库不可用或存在待应用迁移时返回 503；显式迁移命令失败时以非零状态退出。
-- [ ] 补充并演练 PostgreSQL 备份和恢复操作。
+- [x] 补充并演练 PostgreSQL 备份和恢复操作。
 
 ### 阶段交付物
 
@@ -50,9 +50,11 @@
 - [x] 状态与对应 transition history 通过同一 `SaveChanges` 事务写入。
 - [x] 并发更新使用版本条件拒绝过期写入。
 - [x] 已启动的 PostgreSQL 17 空白应用 schema 成功应用两条检查入库的 migration。
-- [ ] 在已有生产数据的数据库上验证后续 migration 升级策略。
+- [x] 在已有生产数据的数据库上验证后续 migration 升级策略。
 
 阶段 1 验证记录：开发沙箱 PostgreSQL 17 已应用 `202611140001_InitialCertificateJobs` 和 `202611140002_ManagedServices`。临时 smoke run 创建任务、写入 `Queued → Connecting → GeneratingCsr`，随后由新的 dotnet 进程读回 `state=GeneratingCsr`、`version=2`、`transitions=2`；验证记录已清理。`dotnet build TrustForge.sln` 通过，EF Core 工具确认模型快照无待处理变化。
+
+阶段 1 升级策略验证记录（2026-11-15）：新增 `dev/acme-lab/drill-migration.sh`，在独立可弃侧库 `trustforge_upgrade` 上以离线生成的 baseline schema（前 5 迁移，截至 `202611150001_DeploymentVersionsAndAlerts`）播种生产样数据（2 服务 / 5 任务 / 10 转换 / 3 部署版本 / 2 告警，含 PascalCase checkpoint，无密钥材料），经产品真实 `--migrate` 路径（一次性 `--entrypoint dotnet … TrustForge.dll --migrate` 容器）增量应用 `202611150002_RenewalAndActiveJobGuard` + `202611150003_ExpiryReminders`。断言全过：升级前 baseline 无 `renewal_enabled`/active-job 守卫（证明是增量升级而非全新安装）；升级后 history=7、五行计数全保全、既有行取新列默认值（`renewal_enabled=false` / `renewal_lead_time=0` / `certificate_not_after` NULL）、3 新索引 + partial `job_id` 索引 + `ck_certificate_alerts_identity` 约束就位、checkpoint JSON 完好；幂等重跑 no-op；新形态 NULL-job + `dedupe_key` 到期告警可写、重复 dedupe / identity 违规被拒；负例库 `trustforge_upgrade_bad` 播种同服务第 2 个活动任务 → `--migrate` 非零退出（Npgsql `23505` `ux_certificate_jobs_active_service`，实证见 `secrets/upgrade-guard.log`）且每迁移原子回滚（history 停 5、无 partial schema）。两侧库用后即 DROP（仅硬编码名）。ef tools 10.0.14 / runtime 10.0.15 错配使 `migrations script` 拒绝任何具名目标，改用全量脚本 + 按 `START TRANSACTION;` 截断至 baseline（不改全局工具）。全重置链路 reset→setup→deployment→backup→restore→notification→**migration**→renewal→verify 的 `verify.sh` **79 项全过、0 失败**（72 基础 + 7 迁移段），migrationDrill 段行使（非 SKIP）。
 
 ## 阶段 2：TrustForge API 与服务登记
 
@@ -98,7 +100,7 @@
 - [x] 定义窄接口：`ICertificateIssuer`（ACME）、`IDnsChallengeProvider`（Technitium）、`ILinuxCertificateDeployer`（SSH）。
 - [x] 建立租约续期和有界重试基础；每阶段超时、取消边界和失败阶段摘要由后续实际 Pipeline 处理器补齐。
 - [x] 在真实外部适配器前提供仅用于开发/隔离环境的模拟实现，验证状态机编排。
-- [ ] 引入 outbox 或等效事务性事件模式，保证任务提交与异步工作通知不会丢失。
+- [x] 引入 outbox 或等效事务性事件模式，保证任务提交与异步工作通知不会丢失。（采用 LISTEN/NOTIFY 事务唤醒：`certificate_jobs` 持久行即队列/outbox 等价物，`TryAddAsync` 在 job 插入同事务内 `NOTIFY trustforge_job_submitted`、仅 commit 投递、回滚不发；worker 专用 `LISTEN` 连接即时唤醒，`NotificationEnabled` 默认开、轮询兜底，漏通知只损延迟不丢任务；重试靠轮询；无独立 outbox 表、无 schema 迁移。）
 
 ### 完成条件
 
@@ -127,12 +129,12 @@
 
 ### 实施项
 
-- [ ] 固定 SSH 主机密钥指纹；提供连接测试和指纹变更阻断。
-- [ ] 实现 SSH 凭据引用解析、专用低权限账号、SFTP 暂存和连接超时。
-- [ ] 编写 Linux root-owned `trustforge-certctl` 安装助手及版本化协议：生成密钥/CSR、校验 CSR、安装证书、原子切换、执行固定 reload/health check、回滚。
-- [ ] 助手仅接受服务 ID/任务 ID和受白名单限制的操作，不接受任意 shell 命令或任意路径。
-- [ ] 实现部署版本记录、文件权限核对、实际服务端证书指纹探测和失败告警。
-- [ ] 清理暂存与回滚槽位按保留策略执行，不得删除当前有效版本。
+- [x] 固定 SSH 主机密钥指纹；提供连接测试和指纹变更阻断。
+- [x] 实现 SSH 凭据引用解析、专用低权限账号、SFTP 暂存和连接超时。（偏差说明：暂存经 root-owned 助手的 stdin JSON 协议完成，未使用 SFTP——私钥始终在目标主机生成并保留，API 只传输 CSR 与公钥证书链。）
+- [x] 编写 Linux root-owned `trustforge-certctl` 安装助手及版本化协议：生成密钥/CSR、校验 CSR、安装证书、原子切换、执行固定 reload/health check、回滚。
+- [x] 助手仅接受服务 ID/任务 ID和受白名单限制的操作，不接受任意 shell 命令或任意路径。
+- [x] 实现部署版本记录、文件权限核对、实际服务端证书指纹探测和失败告警。
+- [x] 清理暂存与回滚槽位按保留策略执行，不得删除当前有效版本。
 
 ### 完成条件
 
@@ -145,11 +147,11 @@
 
 ### 实施项
 
-- [ ] 为服务配置续期提前量和自动续期开关；调度扫描仅对进入窗口的服务创建任务。
-- [ ] 对同一服务施加数据库级并发保护，防止重复续期/部署。
-- [ ] 配置到期提醒、任务失败告警、审计导出、备份恢复演练和 CA 运维手册。
-- [ ] 准备 PostgreSQL 备份、升级迁移、密钥轮换、灾难恢复及监控指标文档。
-- [ ] 评估生产 HSM/KMS、step-ca 高可用和 TrustForge 多实例部署。
+- [x] 为服务配置续期提前量和自动续期开关；调度扫描仅对进入窗口的服务创建任务。
+- [x] 对同一服务施加数据库级并发保护，防止重复续期/部署。
+- [x] 配置到期提醒、任务失败告警、审计导出、备份恢复演练和 CA 运维手册。
+- [x] 准备 PostgreSQL 备份、升级迁移、密钥轮换、灾难恢复及监控指标文档。
+- [x] 评估生产 HSM/KMS、step-ca 高可用和 TrustForge 多实例部署。
 
 ### 完成条件
 
@@ -161,4 +163,19 @@
 
 阶段 4 已完成并在开发 ACME 实验室（`dev/acme-lab/`）通过端到端验证：真实 step-ca ACME + Technitium DNS-01 签发、成功/失败/恢复路径的挑战记录清理、密钥隔离、`AwaitingChallenge` 崩溃后的租约过期重领恢复演练，以及账户订单对账（日志确认复用）。协议与校验语义见 `CERTIFICATE-PIPELINE.md`，实验室用法见 `dev/acme-lab/README.md`。吊销 CA 管理通道仍未实现。
 
-阶段 5 的 SSH 部署器与 root-owned `trustforge-certctl` 助手已随阶段 4 提前实现（固定主机密钥指纹、窄 JSON 协议、原子切换/reload/health/回滚）；剩余：连接测试接口、部署版本记录与失败告警、暂存/回滚槽位按保留策略清理。阶段 3 的 outbox 项仍开放。下一步继续阶段 5 剩余项，然后进入阶段 6 自动续期。
+阶段 5 已完成并在开发 ACME 实验室通过端到端验证（`setup.sh` → `drill-deployment.sh` → `verify.sh`，38 项检查全过，2026-11-15）：部署版本记录（Staged/Active/Superseded/RolledBack/RollbackFailed + 健康状态与 verifiedAt）、终态失败同事务写入告警并经 webhook 投递（JobFailed/DeploymentRolledBack 为 Warning、RollbackFailed 为 Critical，均 Delivered 且有接收端回执）、verify 阶段文件权限核对（root:root 0600/0644）与服务端证书指纹探测、保留策略清理（保护 current 与回滚槽，保留最新 2 个 release，最旧 release 与任务密钥目录被清除）。回滚与回滚失败演练由健康失败标记触发。暂存经助手 stdin JSON 协议而非 SFTP（私钥不出目标主机）。实验室 step-ca 为补丁构建（修复上游 orderIDs 索引损坏，见 `dev/acme-lab/step-ca/Dockerfile`）。吊销 CA 管理通道仍未实现；阶段 3 的 outbox 项仍开放。
+
+阶段 6 前两项（服务级续期开关/提前量 + 调度扫描、数据库级同服务并发保护）已完成并在开发 ACME 实验室通过端到端验证（`setup.sh` → `drill-deployment.sh` → `drill-renewal.sh` → `verify.sh`，49 项检查全过，2026-11-15）：`managed_services` 增加 `renewal_enabled`/`renewal_lead_time`，`deployment_versions` 记录 `certificate_not_after`；`RenewalSchedulerWorker` 周期扫描进入续期窗口（`certificate_not_after <= now + renewal_lead_time`）且无活动任务、且最近一个最小续期间隔内无续期任务的服务，按指纹幂等键 `renewal-{fingerprint}` 经协调器创建任务（演练用 25h 提前量 > 24h 证书寿命，使服务始终在窗口内，验证最小续期间隔 + 指纹幂等键防止每次扫描重复签发，实测仅生成 1 个续期任务并成功、supersede 引导版本）；`certificate_jobs` 部分唯一索引 `ux_certificate_jobs_active_service`（仅覆盖 9 个活动状态）施加同服务单活动任务保护，并发创建第二个任务实测返回 409 `service_job_active` 且未落库。迁移 `202611150002_RenewalAndActiveJobGuard`。注意 .NET `TimeSpan.TryParse("25:00:00")` 解析为 25 天而非 25 小时，提前量须用无歧义格式如 `1.01:00:00`。阶段 6 其余项（到期提醒/告警/审计/备份演练/CA 手册、PG 备份/迁移/轮换/DR/监控文档、HSM/KMS/HA 评估）留待后续；吊销 CA 管理通道与阶段 3 outbox 仍开放。
+
+阶段 6 剩余三项已完成并在开发 ACME 实验室通过**全重置**端到端验证（reset → `setup.sh` → `drill-deployment.sh` → `drill-backup.sh` → `drill-restore.sh` → `drill-renewal.sh` → `verify.sh`，69 项检查全过、0 失败，2026-11-15）。备份/恢复排在续期之前，使续期服务在恢复后新注册，避开恢复后调度器竞争；verify 紧接续期在 2min 最小续期间隔内运行。交付物：
+
+- **到期提醒**：新增 `ExpiryReminderWorker`（`CertificateJobs:Expiry`，`ScanInterval` 默认 1h、`ReminderWindow` 默认 7d），扫描活动证书进入提醒窗口者经 `ICertificateAlertStore.TryAddAsync` 写入 `CertificateExpiring`/Warning 告警，`JobId` 可空、按 `dedupeKey=expiring:{serviceId}:{fingerprint}` 部分唯一索引去重（每证书至多一条），独立于续期策略（`renewalEnabled=false` 也提醒）。`certificate_alerts.job_id` 改可空 + 新增 `dedupe_key`，迁移 `202611150003_ExpiryReminders`。lab 用 5s 扫描/7d 窗口使 24h 证书恒在窗口，实测 svc1 提醒 Delivered、跨多次扫描去重为 1 行、续期后 svc4 新指纹自有提醒、任务失败告警仍带 `jobId` 无 `dedupeKey`。
+- **审计导出**：`GET /api/v1/audit/export`（CertificateReader 角色）返回 `{generatedAt,filters,jobs,deploymentVersions,alerts}`，字符串枚举，支持 `serviceId/from/to/limit` 过滤。实测含当前任务（transition 字符串态）、Active 版本、失败+到期两类告警、`serviceId` 过滤逐段生效、future `from` 为空、匿名 401。
+- **备份恢复演练**：`drill-backup.sh`（`pg_dump -Fc` + CA/artifacts/dns-config 卷 tar + target 可写层 tar + secrets 副本 + manifest 行数/哈希）与 `drill-restore.sh`（`down -v` 后**先恢复卷再启动服务**——step-ca 空卷会重新初始化新 CA、target 用现有镜像绝不 `--build`、`pg_restore --no-owner --no-privileges --exit-on-error`），断言行数==manifest 并新发 svc1 任务证明 CA 密钥恢复。实测恢复后 managed_services/certificate_jobs/deployment_versions = 3/6/5 行匹配、新任务 Succeeded、备份任务存活。
+- **文档**：`OPERATIONS.md`（状态布局、CA 运维含 orderIDs 补丁与先恢复再启动、root/中间证书轮换 vs ACME account-key 轮换、PG 备份/PITR/恢复 runbook/升级迁移/编写约定、密钥轮换表、DR 故障域表与手动 runbook、监控含 health/告警表/dashboard SQL/审计导出）、`HSM-KMS-HA-EVALUATION.md`（step-ca PKCS#11/`kms:` 与 root 离线、`ISecretResolver` 接缝接 Vault/KMS、step-ca badger 单写者→active/passive 或 SQL 后端且 orderIDs 补丁 nosql 专属须重验、多实例安全部分 SKIP LOCKED/fencing/唯一索引/幂等 vs 阻塞项内嵌 DNS/本地 artifacts/并发 `--migrate`、采用矩阵）；同步更新 `TrustForge.Api/README.md`、`dev/acme-lab/README.md`、`CERTIFICATE-PIPELINE.md`、`DEPLOYMENT.md`。
+
+阶段 6 三项完成条件均成立：自动续期按策略运行不重复签发；失败重试可恢复、服务沿用旧证书直至新证书成功部署；运维人员可依文档恢复 PostgreSQL、CA 配置/密钥备份和服务证书部署状态。Phase 1「补充并演练 PostgreSQL 备份和恢复操作」已勾选。仍开放：吊销 CA 管理通道、Phase 1「在已有生产数据的数据库上验证后续 migration 升级策略」（本轮恢复的是已含全部迁移的 dump，`--migrate` 为 no-op，未跑真正旧→新升级变体）、DNS 统一登录/入口。
+
+阶段 3 outbox 项已完成并在开发 ACME 实验室通过端到端验证（2026-11-15）。勘察确认原系统**无丢失通知缺口**：worker 纯轮询持久化 `certificate_jobs` 行（`FOR UPDATE SKIP LOCKED` + 租约过期重领），job 行即持久队列、处理已是 at-least-once，告警已是「同事务写入 + 轮询投递」的 outbox 雏形。按用户选定采用 **LISTEN/NOTIFY 事务唤醒**（非独立 outbox 表）：`PostgresCertificateJobStore.TryAddAsync` 在 job 插入的同一事务内 `NOTIFY trustforge_job_submitted`（仅 commit 投递、冲突回滚不发），worker 经 `IJobSubmissionChannel`/`PostgresJobSubmissionChannel` 专用 `LISTEN` 连接（`Pooling=false`、`ApplicationName=trustforge-job-listener`、断线 ~2s 冷却重连）即时唤醒；`CertificateJobs:Worker:NotificationEnabled` 默认 true（Compose `TRUSTFORGE_WORKER_NOTIFICATION_ENABLED`），关闭则纯轮询；首轮先 claim 覆盖启动窗口，错误分支保留退避，租约/心跳/重试不动。NOTIFY 是延迟提示、durable 行是唯一真相源，漏通知（重启/重连/启动窗口/DB 宕机）只损延迟不丢任务；重试（`next_attempt_at`）靠轮询；多实例 NOTIFY 广播 + SKIP LOCKED + 每次新 fencing token 保证不重复处理；Npgsql 忙碌时缓冲通知→claim 间不漏唤醒。无模型变化、无新迁移，构建 0 警告。新增 `dev/acme-lab/drill-notification.sh` **相位锚定 A/B** 实证（锚任务终态→worker 进入完整 30s 等待→sleep 2→建 B 测延迟，避开轮询相位运气）：控制相（NotificationEnabled=false）B=30s（轮询界 ≥20）vs 通知相（true）B=4s（NOTIFY 唤醒 <12）+ `pg_stat_activity` listener present，结论性证明事务唤醒生效且轮询兜底。全重置链路（reset→setup→deployment→backup→restore→**notification**→renewal→verify）`verify.sh` **72 项全过、0 失败**（69 基础 + 3 通知段；notification 置于 renewal→verify 之前，既守住 ≤2min 续期窗口又使 verify 行使通知段）。文档同步：`CERTIFICATE-PIPELINE.md` 新增「Job submission and transactional wake」、`TrustForge.Api/README.md` worker 段、`OPERATIONS.md` 6.3 listener SQL / 6.5 事务唤醒 / §7 链路、`dev/acme-lab/README.md` 通知演练节、`DEPLOYMENT.md` worker 唤醒说明。仍开放：吊销 CA 管理通道、Phase 1 旧→新 migration 升级变体、DNS 统一登录/入口。
+
+阶段 1 末项「在已有生产数据的数据库上验证后续 migration 升级策略」已完成并在开发 ACME 实验室通过端到端验证（2026-11-15，详见阶段 1 升级策略验证记录）：新增 `drill-migration.sh` 真实 old→new 增量升级演练（baseline 播种生产样数据 → 产品 `--migrate` 增量升级 → 数据保全 / 新列默认值 / 新索引约束 / 幂等重跑 / 新形态写入 / 脏数据 `23505` 拒绝 + 每迁移回滚），用独立可弃侧库 + 一次性容器，置于 notification 之后、renewal→verify 之前（不 recreate app、不碰主库 / Keycloak netns / 续期窗口）。全重置链路 `verify.sh` **79 项全过、0 失败**（72 基础 + 7 迁移段），migrationDrill 段行使。文档同步：`dev/acme-lab/README.md`（usage + Migration upgrade drill 节 + host dotnet/ef 要求 + 顺序）、`OPERATIONS.md`（§3.3 指向演练 + §7 链路）。仍开放：吊销 CA 管理通道、DNS 统一登录/入口。

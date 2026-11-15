@@ -65,6 +65,12 @@ public sealed class SshLinuxCertificateDeployer(ISecretResolver secrets) : ILinu
         return response.PreviousReleaseId;
     }
 
+    public async Task PruneReleasesAsync(ManagedService service, int retainedReleases, CancellationToken cancellationToken = default)
+    {
+        using SshClient client = await ConnectAsync(service, cancellationToken);
+        _ = await InvokeAsync<HelperResponse>(client, new("prune", service.Id, RetainedReleases: retainedReleases), cancellationToken);
+    }
+
     private async Task<SshClient> ConnectAsync(ManagedService service, CancellationToken cancellationToken)
     {
         SshCredential credential = JsonSerializer.Deserialize<SshCredential>(
@@ -139,7 +145,8 @@ public sealed class SshLinuxCertificateDeployer(ISecretResolver secrets) : ILinu
         string? ChainPem = null,
         string? FingerprintSha256 = null,
         DateTimeOffset? NotBefore = null,
-        DateTimeOffset? NotAfter = null);
+        DateTimeOffset? NotAfter = null,
+        int? RetainedReleases = null);
     private sealed record HelperResponse(
         bool Success,
         string? Error = null,

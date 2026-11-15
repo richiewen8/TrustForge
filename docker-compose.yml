@@ -19,7 +19,13 @@ services:
       CertificateJobs__Simulation__Enabled: ${TRUSTFORGE_SIMULATION_ENABLED:-false}
       CertificateJobs__Artifacts__Directory: /var/lib/trustforge/artifacts
       CertificateJobs__Worker__PollInterval: ${TRUSTFORGE_WORKER_POLL_INTERVAL:-00:00:02}
+      CertificateJobs__Worker__NotificationEnabled: ${TRUSTFORGE_WORKER_NOTIFICATION_ENABLED:-true}
       CertificateJobs__Worker__LeaseDuration: ${TRUSTFORGE_WORKER_LEASE_DURATION:-00:02:00}
+      CertificateJobs__Alerts__WebhookUrl: ${TRUSTFORGE_ALERTS_WEBHOOK_URL:-}
+      CertificateJobs__Renewal__ScanInterval: ${TRUSTFORGE_RENEWAL_SCAN_INTERVAL:-00:05:00}
+      CertificateJobs__Renewal__MinimumRenewalInterval: ${TRUSTFORGE_RENEWAL_MIN_INTERVAL:-01:00:00}
+      CertificateJobs__Expiry__ScanInterval: ${TRUSTFORGE_EXPIRY_SCAN_INTERVAL:-01:00:00}
+      CertificateJobs__Expiry__ReminderWindow: ${TRUSTFORGE_EXPIRY_REMINDER_WINDOW:-7.00:00:00}
       SmallstepAcme__DirectoryUrl: ${TRUSTFORGE_ACME_DIRECTORY_URL:-}
       SmallstepAcme__AccountEmail: ${TRUSTFORGE_ACME_ACCOUNT_EMAIL:-}
       SmallstepAcme__AccountKeySecretRef: ${TRUSTFORGE_ACME_ACCOUNT_KEY_REF:-}

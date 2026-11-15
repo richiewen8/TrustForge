@@ -16,13 +16,13 @@ RUN apt-get update \
 
 COPY remote-helper/trustforge-certctl /usr/local/sbin/trustforge-certctl
 COPY dev/acme-lab/target/actions.json /etc/trustforge/actions.json
-COPY dev/acme-lab/target/tls-service.py dev/acme-lab/target/supervise.sh dev/acme-lab/target/reload.sh dev/acme-lab/target/health.sh /usr/local/libexec/trustforge-demo/
+COPY dev/acme-lab/target/tls-service.py dev/acme-lab/target/supervise.sh dev/acme-lab/target/reload.sh dev/acme-lab/target/health.sh dev/acme-lab/target/health-conditional.sh dev/acme-lab/target/alert-receiver.py /usr/local/libexec/trustforge-demo/
 COPY dev/acme-lab/target/entrypoint.sh /usr/local/sbin/lab-entrypoint.sh
 
 RUN chown root:root /usr/local/sbin/trustforge-certctl /etc/trustforge/actions.json /usr/local/sbin/lab-entrypoint.sh \
     && chmod 0750 /usr/local/sbin/trustforge-certctl \
     && chmod 0600 /etc/trustforge/actions.json \
-    && chmod 0755 /usr/local/sbin/lab-entrypoint.sh /usr/local/libexec/trustforge-demo/supervise.sh /usr/local/libexec/trustforge-demo/reload.sh /usr/local/libexec/trustforge-demo/health.sh /usr/local/libexec/trustforge-demo/tls-service.py \
+    && chmod 0755 /usr/local/sbin/lab-entrypoint.sh /usr/local/libexec/trustforge-demo/supervise.sh /usr/local/libexec/trustforge-demo/reload.sh /usr/local/libexec/trustforge-demo/health.sh /usr/local/libexec/trustforge-demo/health-conditional.sh /usr/local/libexec/trustforge-demo/tls-service.py /usr/local/libexec/trustforge-demo/alert-receiver.py \
     && chown -R root:root /usr/local/libexec/trustforge-demo
 
 EXPOSE 22 8443

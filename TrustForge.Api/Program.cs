@@ -1,9 +1,13 @@
 using System.Security.Claims;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
+using TrustForge.Core.CertificateAlerts;
 using TrustForge.Core.CertificateJobs;
+using TrustForge.Core.DeploymentVersions;
 using TrustForge.Core.ManagedServices;
 using TrustForge.Core.Security;
 using TrustForge.Persistence;
@@ -25,6 +29,10 @@ builder.Services.AddScoped<IDnsChallengeProvider, TechnitiumDnsChallengeProvider
 builder.Services.AddScoped<ILinuxCertificateDeployer, SshLinuxCertificateDeployer>();
 builder.Services.AddScoped<CertificateJobCoordinator>();
 builder.Services.Configure<CertificateJobWorkerOptions>(builder.Configuration.GetSection("CertificateJobs:Worker"));
+builder.Services.Configure<CertificateAlertOptions>(builder.Configuration.GetSection("CertificateJobs:Alerts"));
+builder.Services.Configure<CertificateRenewalOptions>(builder.Configuration.GetSection("CertificateJobs:Renewal"));
+builder.Services.Configure<CertificateExpiryOptions>(builder.Configuration.GetSection("CertificateJobs:Expiry"));
+builder.Services.Configure<CertificateDeploymentOptions>(builder.Configuration.GetSection("CertificateJobs:Deployment"));
 bool runMigrations = args.Contains("--migrate", StringComparer.Ordinal);
 bool simulationEnabled = builder.Configuration.GetValue<bool>("CertificateJobs:Simulation:Enabled");
 if (simulationEnabled && !runMigrations)
@@ -48,6 +56,11 @@ if ((builder.Configuration.GetValue<bool>("CertificateJobs:Worker:Enabled") || s
     if (!builder.Services.Any(descriptor => descriptor.ServiceType == typeof(ICertificateJobProcessor)))
         throw new InvalidOperationException("The certificate job worker requires an ICertificateJobProcessor implementation.");
     builder.Services.AddHostedService<CertificateJobWorker>();
+    builder.Services.AddHttpClient("CertificateAlerts", client => client.Timeout = TimeSpan.FromSeconds(15));
+    builder.Services.AddScoped<ICertificateAlertSink, CertificateAlertSink>();
+    builder.Services.AddHostedService<CertificateAlertDeliveryWorker>();
+    builder.Services.AddHostedService<RenewalSchedulerWorker>();
+    builder.Services.AddHostedService<ExpiryReminderWorker>();
 }
 builder.Services.AddHostedService<DnsServerHostedService>();
 
@@ -144,6 +157,97 @@ api.MapGet("/services/{id:guid}", async (Guid id, IManagedServiceStore services,
 })
 .RequireAuthorization("CertificateReader");
 
+api.MapPost("/services/{id:guid}/connection-test", async (
+    Guid id,
+    IManagedServiceStore services,
+    ILinuxCertificateDeployer deployer,
+    CancellationToken cancellationToken) =>
+{
+    ManagedService? service = await services.FindByIdAsync(id, cancellationToken);
+    if (service is null)
+        return Results.NotFound();
+
+    try
+    {
+        // Connects with the pinned host key and runs the helper's validate operation; a fingerprint mismatch aborts before any remote operation.
+        await deployer.ConnectAndValidateAsync(service, cancellationToken);
+        return Results.Ok(new { success = true });
+    }
+    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+    {
+        throw;
+    }
+    catch (Exception exception)
+    {
+        string message = exception.Message.Length <= 2048 ? exception.Message : exception.Message[..2048];
+        return Results.Ok(new { success = false, error = message });
+    }
+})
+.RequireAuthorization("CertificateOperator");
+
+api.MapGet("/services/{id:guid}/deployment-versions", async (
+    Guid id,
+    int? limit,
+    IManagedServiceStore services,
+    IDeploymentVersionStore versions,
+    CancellationToken cancellationToken) =>
+{
+    if (await services.FindByIdAsync(id, cancellationToken) is null)
+        return Results.NotFound();
+    IReadOnlyList<DeploymentVersion> items = await versions.ListByServiceAsync(id, limit ?? 50, cancellationToken);
+    return Results.Ok(items.Select(DeploymentVersionResponse.From));
+})
+.RequireAuthorization("CertificateReader");
+
+api.MapGet("/certificate-alerts", async (
+    Guid? serviceId,
+    string? deliveryState,
+    int? limit,
+    ICertificateAlertStore alerts,
+    CancellationToken cancellationToken) =>
+{
+    CertificateAlertDeliveryState? state = null;
+    if (deliveryState is not null)
+    {
+        if (!Enum.TryParse(deliveryState, ignoreCase: true, out CertificateAlertDeliveryState parsed))
+            return Results.ValidationProblem(new Dictionary<string, string[]> { ["deliveryState"] = ["Use Pending, Delivered, or Failed."] });
+        state = parsed;
+    }
+    IReadOnlyList<CertificateAlert> items = await alerts.ListAsync(serviceId, state, null, null, limit ?? 50, cancellationToken: cancellationToken);
+    return Results.Ok(items.Select(CertificateAlertResponse.From));
+})
+.RequireAuthorization("CertificateReader");
+
+api.MapGet("/audit/export", async (
+    Guid? serviceId,
+    DateTimeOffset? from,
+    DateTimeOffset? to,
+    int? limit,
+    ICertificateJobStore jobs,
+    IDeploymentVersionStore versions,
+    ICertificateAlertStore alerts,
+    TimeProvider timeProvider,
+    CancellationToken cancellationToken) =>
+{
+    if (from is not null && to is not null && from > to)
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["from"] = ["'from' must not be later than 'to'."] });
+
+    int take = limit ?? 200;
+    IReadOnlyList<CertificateJob> jobItems = await jobs.ListAsync(serviceId, from, to, take, cancellationToken);
+    IReadOnlyList<DeploymentVersion> versionItems = await versions.ListAsync(serviceId, from, to, take, cancellationToken);
+    IReadOnlyList<CertificateAlert> alertItems = await alerts.ListAsync(serviceId, null, from, to, take, cancellationToken);
+    var bundle = new
+    {
+        generatedAt = timeProvider.GetUtcNow(),
+        filters = new { serviceId, from, to, limit = take },
+        jobs = jobItems,
+        deploymentVersions = versionItems,
+        alerts = alertItems
+    };
+    return Results.Json(bundle, new JsonSerializerOptions(JsonSerializerDefaults.Web) { Converters = { new JsonStringEnumConverter() } });
+})
+.RequireAuthorization("CertificateReader");
+
 api.MapPost("/services/{id:guid}/certificate-jobs", async (
     Guid id,
     HttpRequest request,
@@ -166,7 +270,15 @@ api.MapPost("/services/{id:guid}/certificate-jobs", async (
     if (string.IsNullOrWhiteSpace(idempotencyKey) || idempotencyKey.Length > 200)
         return Results.ValidationProblem(new Dictionary<string, string[]> { ["Idempotency-Key"] = ["A key between 1 and 200 characters is required."] });
 
-    CertificateJob job = await coordinator.CreateManualJobAsync(id, subject, idempotencyKey, cancellationToken);
+    CertificateJob job;
+    try
+    {
+        job = await coordinator.CreateManualJobAsync(id, subject, idempotencyKey, cancellationToken);
+    }
+    catch (CertificateJobActiveConflictException)
+    {
+        return Results.Conflict(new { error = "service_job_active" });
+    }
     return Results.Accepted($"/api/v1/certificate-jobs/{job.Id}", CertificateJobResponse.From(job));
 })
 .RequireAuthorization("CertificateOperator");
@@ -201,7 +313,9 @@ internal sealed record CreateManagedServiceRequest(
     string? FileMode,
     string? RemoteHelperId,
     string? ReloadActionId,
-    string? HealthCheckId)
+    string? HealthCheckId,
+    bool? RenewalEnabled,
+    string? RenewalLeadTime)
 {
     public bool TryCreate(
         DateTimeOffset now,
@@ -259,6 +373,12 @@ internal sealed record CreateManagedServiceRequest(
         ValidateIdentifier(ReloadActionId, nameof(ReloadActionId), validationErrors);
         ValidateIdentifier(HealthCheckId, nameof(HealthCheckId), validationErrors);
 
+        TimeSpan renewalLeadTime = TimeSpan.FromDays(30);
+        if (RenewalLeadTime is not null
+            && (!TimeSpan.TryParse(RenewalLeadTime.Trim(), System.Globalization.CultureInfo.InvariantCulture, out renewalLeadTime)
+                || renewalLeadTime <= TimeSpan.Zero || renewalLeadTime > TimeSpan.FromDays(365)))
+            AddError(validationErrors, nameof(RenewalLeadTime), "Use a positive duration of at most 365 days, such as 30.00:00:00.");
+
         errors = validationErrors.ToDictionary(pair => pair.Key, pair => pair.Value.ToArray());
         if (errors.Count > 0)
         {
@@ -272,7 +392,7 @@ internal sealed record CreateManagedServiceRequest(
             HostKeyFingerprint!.Trim(), SshCredentialRef!.Trim(), ProfileId, sans,
             CertificatePath!.Trim(), ChainPath!.Trim(), PrivateKeyPath!.Trim(), FileOwner!.Trim(),
             FileGroup!.Trim(), FileMode!.Trim(), RemoteHelperId!.Trim(), ReloadActionId!.Trim(),
-            HealthCheckId!.Trim(), true, now, now);
+            HealthCheckId!.Trim(), RenewalEnabled ?? false, renewalLeadTime, true, now, now);
         return true;
     }
 
@@ -338,6 +458,8 @@ internal sealed record ManagedServiceResponse(
     string RemoteHelperId,
     string ReloadActionId,
     string HealthCheckId,
+    bool RenewalEnabled,
+    TimeSpan RenewalLeadTime,
     bool Enabled,
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt)
@@ -347,7 +469,50 @@ internal sealed record ManagedServiceResponse(
         service.HostKeyFingerprint, service.SshCredentialRef, service.ProfileId, service.Sans,
         service.CertificatePath, service.ChainPath, service.PrivateKeyPath, service.FileOwner,
         service.FileGroup, service.FileMode, service.RemoteHelperId, service.ReloadActionId,
-        service.HealthCheckId, service.Enabled, service.CreatedAt, service.UpdatedAt);
+        service.HealthCheckId, service.RenewalEnabled, service.RenewalLeadTime, service.Enabled, service.CreatedAt, service.UpdatedAt);
+}
+
+internal sealed record DeploymentVersionResponse(
+    Guid Id,
+    Guid ServiceId,
+    Guid JobId,
+    Guid? CertificateId,
+    string Fingerprint,
+    string ReleaseId,
+    string? PreviousReleaseId,
+    string Status,
+    string HealthStatus,
+    DateTimeOffset StagedAt,
+    DateTimeOffset? ActivatedAt,
+    DateTimeOffset? VerifiedAt,
+    DateTimeOffset? CertificateNotAfter)
+{
+    public static DeploymentVersionResponse From(DeploymentVersion version) => new(
+        version.Id, version.ServiceId, version.JobId, version.CertificateId, version.Fingerprint,
+        version.ReleaseId, version.PreviousReleaseId, version.Status.ToString(), version.HealthStatus.ToString(),
+        version.StagedAt, version.ActivatedAt, version.VerifiedAt, version.CertificateNotAfter);
+}
+
+internal sealed record CertificateAlertResponse(
+    Guid Id,
+    Guid? JobId,
+    Guid ServiceId,
+    string Kind,
+    string Severity,
+    string Stage,
+    string Summary,
+    DateTimeOffset OccurredAt,
+    string DeliveryState,
+    int AttemptCount,
+    DateTimeOffset? NextAttemptAt,
+    DateTimeOffset? DeliveredAt,
+    string? LastError,
+    string? DedupeKey)
+{
+    public static CertificateAlertResponse From(CertificateAlert alert) => new(
+        alert.Id, alert.JobId, alert.ServiceId, alert.Kind.ToString(), alert.Severity.ToString(),
+        alert.Stage, alert.Summary, alert.OccurredAt, alert.DeliveryState.ToString(),
+        alert.AttemptCount, alert.NextAttemptAt, alert.DeliveredAt, alert.LastError, alert.DedupeKey);
 }
 
 internal sealed record CertificateJobResponse(

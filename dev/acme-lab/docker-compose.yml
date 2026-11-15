@@ -26,6 +26,13 @@ services:
       CertificateJobs__Artifacts__Directory: /var/lib/trustforge/artifacts
       CertificateJobs__Worker__PollInterval: 00:00:02
       CertificateJobs__Worker__LeaseDuration: 00:02:00
+      CertificateJobs__Alerts__WebhookUrl: http://target:8444/alerts
+      CertificateJobs__Alerts__PollInterval: 00:00:02
+      CertificateJobs__Deployment__RetainedReleases: "2"
+      CertificateJobs__Renewal__ScanInterval: 00:00:05
+      CertificateJobs__Renewal__MinimumRenewalInterval: 00:02:00
+      CertificateJobs__Expiry__ScanInterval: 00:00:05
+      CertificateJobs__Expiry__ReminderWindow: 7.00:00:00
       SmallstepAcme__DirectoryUrl: https://step-ca:9000/acme/acme/directory
       SmallstepAcme__AccountEmail: acme@trustforge.lab
       SmallstepAcme__AccountKeySecretRef: secret://file//run/trustforge/secrets/acme-account.pem
@@ -90,7 +97,12 @@ services:
       retries: 20
 
   step-ca:
-    image: smallstep/step-ca:${LAB_STEP_CA_TAG:-0.30.2}
+    # Patched build: fixes the upstream orderIDs index corruption (see step-ca/Dockerfile).
+    build:
+      context: ./step-ca
+      args:
+        STEP_CA_TAG: ${LAB_STEP_CA_TAG:-0.30.2}
+    image: trustforge-lab-step-ca:${LAB_STEP_CA_TAG:-0.30.2}-orderids-fix
     hostname: step-ca
     networks:
       lab:
