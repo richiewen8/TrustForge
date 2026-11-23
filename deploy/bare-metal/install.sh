@@ -99,13 +99,18 @@ port_pids() {
 }
 
 port_listening() {
-    local proto=$1 port=$2
-    ss -Hl"${proto}n" "sport = :$port" 2>/dev/null | grep -q .
+    local proto=$1 port=$2 out
+    # Captured then tested rather than piped into grep -q: this script runs with pipefail, and grep
+    # -q closes the pipe on its first match, so ss can die of SIGPIPE and make an occupied port read
+    # as free. Every one of these checks guards a precondition the installer must not get wrong.
+    out=$(ss -Hl"${proto}n" "sport = :$port" 2>/dev/null || true)
+    [[ -n $out ]]
 }
 
 port_exposed_broadly() {
-    local port=$1
-    ss -Hltn "sport = :$port" 2>/dev/null | grep -qE '(0\.0\.0\.0|\*):'"$port"
+    local port=$1 out
+    out=$(ss -Hltn "sport = :$port" 2>/dev/null || true)
+    grep -qE '(0\.0\.0\.0|\*):'"$port" <<<"$out"
 }
 
 wait_for() {
@@ -258,13 +263,15 @@ check_docker_coexistence() {
 }
 
 check_postgres_host() {
+    local clusters
     if [[ $SKIP_POSTGRES -eq 1 ]]; then
         ok "--skip-postgres: an external cluster is assumed"
         [[ -n $DB_PASSWORD_FILE ]] ||
             hint "--skip-postgres normally pairs with --db-password-file; without it a password is generated for the connection string you must already own."
         return 0
     fi
-    if command -v pg_lsclusters >/dev/null 2>&1 && pg_lsclusters -h 2>/dev/null | grep -q .; then
+    clusters=$(pg_lsclusters -h 2>/dev/null || true)
+    if command -v pg_lsclusters >/dev/null 2>&1 && [[ -n $clusters ]]; then
         bad "this host already has a PostgreSQL cluster:"
         probe "$(pg_lsclusters -h 2>/dev/null | head -3 | tr '\n' ' ')"
         probe "install into it with --skip-postgres plus your own role, or decommission it deliberately first."
@@ -274,7 +281,7 @@ check_postgres_host() {
 }
 
 check_resources_and_time() {
-    local mem_kb avail_kb
+    local mem_kb avail_kb ntp
     mem_kb=$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null || printf '0')
     if ((mem_kb >= 2 * 1024 * 1024)); then
         ok "memory $((mem_kb / 1024 / 1024)) GiB"
@@ -289,7 +296,8 @@ check_resources_and_time() {
         hint "under 10 GiB free on /var: the database, certificate artifacts and DNS logs all grow there."
     fi
 
-    if timedatectl show --property=NTPSynchronized --value 2>/dev/null | grep -qx true; then
+    ntp=$(timedatectl show --property=NTPSynchronized --value 2>/dev/null || true)
+    if [[ $ntp == true ]]; then
         ok "clock synchronised (DNSSEC validation is on by default)"
     elif command -v chronyc >/dev/null 2>&1 && chronyc tracking >/dev/null 2>&1; then
         ok "chrony is tracking (DNSSEC validation is on by default)"
@@ -373,12 +381,14 @@ EOF
 }
 
 ensure_apt_prerequisites() {
+    local icu
     export DEBIAN_FRONTEND=noninteractive
     apt-get -qq update || die "apt-get update failed; no packages could be installed."
     apt-get -qq -y --no-install-recommends install \
         ca-certificates curl gnupg git openssh-client openssl iproute2 util-linux coreutils sed ||
         die "the base toolchain could not be installed."
-    if ! ldconfig -p | grep -q libicu; then
+    icu=$(ldconfig -p 2>/dev/null | grep -c libicu || true)
+    if [[ $icu == 0 ]]; then
         log "installing ICU (the runtime needs it)"
         apt-get -qq -y --no-install-recommends install libicu74 ||
             die "libicu74 is not installable here; .NET cannot run without an ICU build."
@@ -421,10 +431,12 @@ install_libmsquic() {
 }
 
 install_dotnet_runtime() {
+    local runtimes
     [[ -s $BUILD_ROOT/dotnet-install.sh ]] ||
         curl -fsSL --max-time 120 "$DOTNET_INSTALL_URL" -o "$BUILD_ROOT/dotnet-install.sh" ||
         die "could not fetch $DOTNET_INSTALL_URL"
-    if ! "$RUNTIME_ROOT/dotnet" --list-runtimes 2>/dev/null | grep -q "Microsoft.AspNetCore.App $DOTNET_CHANNEL"; then
+    runtimes=$("$RUNTIME_ROOT/dotnet" --list-runtimes 2>/dev/null || true)
+    if ! grep -q "Microsoft.AspNetCore.App $DOTNET_CHANNEL" <<<"$runtimes"; then
         log "installing the ASP.NET Core $DOTNET_CHANNEL runtime into $RUNTIME_ROOT"
         bash "$BUILD_ROOT/dotnet-install.sh" -c "$DOTNET_CHANNEL" --runtime aspnetcore --no-path \
             --install-dir "$RUNTIME_ROOT" >>"$INSTALL_LOG" 2>&1 ||
@@ -648,7 +660,9 @@ verify_runtime() {
         printf 'ASPNETCORE_URLS is not frozen, so fix %s and restart.\n' "$ENV_FILE" >&2
         return 1
     fi
-    ui_listener=$(ss -Hltn "sport = :$DNS_UI_PORT" | awk '{print $4}' | head -1)
+    # NR==1 inside awk instead of head -1: head closes the pipe as soon as it has a line, and under
+    # pipefail that turns a successful read into a failed assignment that aborts the script.
+    ui_listener=$(ss -Hltn "sport = :$DNS_UI_PORT" 2>/dev/null | awk 'NR==1{print $4}' || true)
     ok "runtime sockets as intended: 53 tcp+udp, console ${ui_listener:-none}, API 127.0.0.1:$API_PORT"
 }
 

@@ -4,6 +4,9 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <!-- The only version source of truth in this repository. deploy/release/make-package.sh reads
+         it, and CI asserts the release tag equals it; nothing else declares a TrustForge version. -->
+    <Version>0.1.0</Version>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <RootNamespace>TrustForge.Api</RootNamespace>
     <AssemblyName>TrustForge</AssemblyName>

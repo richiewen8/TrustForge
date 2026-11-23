@@ -29,6 +29,11 @@ deploy/bare-metal/dist/
 [Dd]ebugPublic/
 [Rr]elease/
 [Rr]eleases/
+# The rules above exist for MSBuild's bin/Release output, but they also swallowed the directory that
+# holds the release *tooling*. Un-ignore it explicitly; packaging output goes to
+# deploy/bare-metal/dist/ (line 22), which stays ignored.
+!deploy/release/
+!deploy/release/**
 [Xx]64/
 [Xx]86/
 [Bb]uild/
