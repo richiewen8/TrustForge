@@ -14,6 +14,8 @@ dev/acceptance/*.env
 dev/acceptance/hosts.json
 dev/acceptance/secrets/
 dev/acceptance/out/
+# Generated from the operator's own preflight run, so it describes their environment, not the repo.
+dev/acceptance/FILL_CHECKLIST.md
 
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs
