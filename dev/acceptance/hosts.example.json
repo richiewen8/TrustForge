@@ -1,0 +1,35 @@
+[
+  {
+    "name": "acceptance-nginx-01",
+    "environment": "production",
+    "owner": "platform-team",
+    "host": "10.20.30.41",
+    "port": 22,
+    "hostKeyFingerprint": "SHA256:REPLACE_WITH_TARGET_ED25519_FINGERPRINT",
+    "sshCredentialRef": "secret://file//run/trustforge/secrets/ssh-acceptance-01.json",
+    "profileId": "11111111-1111-1111-1111-111111111111",
+    "sans": [
+      "acceptance-01.internal.example.internal"
+    ],
+    "certificatePath": "/etc/nginx/trustforge/current/certificate.pem",
+    "chainPath": "/etc/nginx/trustforge/current/chain.pem",
+    "privateKeyPath": "/etc/nginx/trustforge/current/private-key.pem",
+    "fileOwner": "root",
+    "fileGroup": "www-data",
+    "fileMode": "0640",
+    "remoteHelperId": "trustforge-certctl-v1",
+    "reloadActionId": "nginx-reload",
+    "healthCheckId": "nginx-health",
+    "renewalEnabled": false,
+    "renewalLeadTime": "30.00:00:00",
+    "tlsProbe": {
+      "host": "10.20.30.41",
+      "port": 443,
+      "serverName": "acceptance-01.internal.example.internal"
+    },
+    "probeSsh": {
+      "host": "10.20.30.41",
+      "port": 22
+    }
+  }
+]

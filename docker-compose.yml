@@ -26,6 +26,13 @@ services:
       CertificateJobs__Renewal__MinimumRenewalInterval: ${TRUSTFORGE_RENEWAL_MIN_INTERVAL:-01:00:00}
       CertificateJobs__Expiry__ScanInterval: ${TRUSTFORGE_EXPIRY_SCAN_INTERVAL:-01:00:00}
       CertificateJobs__Expiry__ReminderWindow: ${TRUSTFORGE_EXPIRY_REMINDER_WINDOW:-7.00:00:00}
+      # A pending revocation is retried by this worker until the CA accepts it, so disabling it
+      # leaves revocations recorded but unexecuted.
+      CertificateJobs__Revocation__Enabled: ${TRUSTFORGE_REVOCATION_ENABLED:-true}
+      CertificateJobs__Revocation__PollInterval: ${TRUSTFORGE_REVOCATION_POLL_INTERVAL:-00:00:10}
+      CertificateJobs__Revocation__VisibilityTimeout: ${TRUSTFORGE_REVOCATION_VISIBILITY_TIMEOUT:-00:02:00}
+      CertificateJobs__Revocation__MaxAttempts: ${TRUSTFORGE_REVOCATION_MAX_ATTEMPTS:-5}
+      CertificateJobs__Deployment__RetainedReleases: ${TRUSTFORGE_RETAINED_RELEASES:-3}
       SmallstepAcme__DirectoryUrl: ${TRUSTFORGE_ACME_DIRECTORY_URL:-}
       SmallstepAcme__AccountEmail: ${TRUSTFORGE_ACME_ACCOUNT_EMAIL:-}
       SmallstepAcme__AccountKeySecretRef: ${TRUSTFORGE_ACME_ACCOUNT_KEY_REF:-}
@@ -54,6 +61,9 @@ services:
       - trustforge-dns-config:/etc/trustforge/dns
       - trustforge-dns-logs:/var/log/technitium/dns
       - trustforge-certificate-artifacts:/var/lib/trustforge/artifacts
+      # secret://file// references resolve inside the container, so the files they name must be here.
+      # Read-only: the API writes keys to targets, never to its own secret store.
+      - ${TRUSTFORGE_SECRETS_DIR:-./secrets}:/run/trustforge/secrets:ro
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://127.0.0.1:5000/health/ready"]
       interval: 30s

@@ -43,6 +43,31 @@ The worker wakes on a transactional PostgreSQL `NOTIFY` sent in the same transac
 
 step-ca must resolve the challenge names through this Technitium instance (point the CA's system resolver at it). Each managed Linux target needs the root-owned `trustforge-certctl` helper, root-managed service/action registrations and a dedicated SSH account restricted to that helper; see [remote-helper/README.md](remote-helper/README.md). Issued public certificate material is stored in the `trustforge-certificate-artifacts` volume; private keys are generated and remain on the targets.
 
+### Secret files, revocation and CRL distribution
+
+`secret://file//run/trustforge/secrets/<name>` references resolve **inside the container**, so the
+directory `TRUSTFORGE_SECRETS_DIR` (default `./secrets`) is bind-mounted read-only at
+`/run/trustforge/secrets`. Put there: the ACME account key PEM, `SmallstepAcme:RootCertificatePath`,
+the Technitium API token, and one `{"username","privateKeyPem"}` JSON per managed service (the path
+goes in that service's `sshCredentialRef`). Read-only is deliberate — the API writes keys to targets
+and never to its own secret store. Volumes persist container recreation, so deleting the stack with
+`down -v` destroys them; see [OPERATIONS.md](OPERATIONS.md) section 3.
+
+Revocation is a separate durable worker: `TRUSTFORGE_REVOCATION_ENABLED` (default `true`),
+`TRUSTFORGE_REVOCATION_POLL_INTERVAL`, `TRUSTFORGE_REVOCATION_VISIBILITY_TIMEOUT` and
+`TRUSTFORGE_REVOCATION_MAX_ATTEMPTS`. A `POST /api/v1/services/{id}/revocations` (role
+`PlatformAdmin` only) records the request and the worker delivers it to the CA; if the worker is
+disabled, or the container has no account key, the record stays `Pending` forever — a revocation that
+was requested is not a revocation that happened. Set `TRUSTFORGE_RETAINED_RELEASES` for how many
+releases each target keeps after a verified deployment.
+
+Publishing the result is the CA's job: step-ca serves a CRL only when its provisioner JSON enables
+the `crl` block, and a revoked serial appears promptly only with `generateOnRevoke`. Verify the
+endpoint that relying parties will actually use — `curl --cacert <root> <crl url> | openssl crl
+-inform DER -noout -text` — and confirm your serial is listed after revoking. Measured timings and
+the CA-side knobs are in [OPERATIONS.md](OPERATIONS.md) section 2.6; `dev/acceptance/` asserts all of
+it against a real CA before you rely on it.
+
 For an isolated end-to-end rehearsal of this configuration, use the disposable lab in [dev/acme-lab/README.md](dev/acme-lab/README.md).
 
 For day-two operations — backup/restore, key rotation, schema upgrades, disaster recovery and monitoring — see [OPERATIONS.md](OPERATIONS.md). For production hardening options (HSM/KMS, step-ca high availability, multi-instance TrustForge) see [HSM-KMS-HA-EVALUATION.md](HSM-KMS-HA-EVALUATION.md).

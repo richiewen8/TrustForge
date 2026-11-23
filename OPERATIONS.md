@@ -127,11 +127,15 @@ restarting the CA:
 ```
 
 The list is then served by `GET /1.0/crl` on the CA port, and already-stored revocations
-appear in it after the next generation. Two CA limits to plan around: issued leaves carry
-**no** CRL Distribution Points extension even when `idpURL` is set, so relying parties must
-be pointed at the CRL URL out of band; and OSS step-ca has no OCSP responder. TrustForge's
-own deployment verification uses `X509RevocationMode.NoCheck` — it proves the chain builds
-against the configured root and matches the deployed fingerprint, while revocation status is
+appear in it after the next generation. Measured with that block on step-ca 0.30.2: the
+`nextUpdate` of the published CRL is `lastUpdate + cacheDuration` (3600 s), and a serial revoked
+through the API was listed within seconds, because `generateOnRevoke` triggers the regeneration —
+without it, budget up to `renewPeriod`/`cacheDuration` before the serial is visible, and a
+publication timeout is then a timing question rather than a lost revocation. Two CA limits to plan
+around: issued leaves carry **no** CRL Distribution Points extension even when `idpURL` is set, so
+relying parties must be pointed at the CRL URL out of band; and OSS step-ca has no OCSP responder.
+TrustForge's own deployment verification uses `X509RevocationMode.NoCheck` — it proves the chain
+builds against the configured root and matches the deployed fingerprint, while revocation status is
 asserted against the CA's CRL.
 
 To revoke:
@@ -414,13 +418,46 @@ cd dev/acme-lab
 
 Run backup/restore **before** `drill-renewal.sh`: the restore drill issues a fresh `svc1`
 job to prove CA recovery, and registering the renewal-enabled service afterwards keeps the
-"exactly one renewal job" assertion free of post-restore scheduler races. Run
+renewal assertions free of post-restore scheduler races. Run
 `drill-notification.sh` **before** `drill-renewal.sh` too: it restores the base worker config
-when it finishes, so `drill-renewal.sh` → `verify.sh` stay adjacent (verify must run within
-the 2-minute minimum renewal interval), and its `notificationDrill` result is already in
+when it finishes and leaves Keycloak ready, and its `notificationDrill` result is already in
 `lab-state.json` so `verify.sh` exercises the notification section. `drill-migration.sh`
 also runs **before** `drill-renewal.sh`: it upgrades disposable side databases through a
-one-off `--migrate` container without recreating the app or touching the main lab database,
-so the renewal → verify window stays intact and its `migrationDrill` result is in
-`lab-state.json`. `verify.sh` includes expiry-reminder, audit-export and (when those drills
+one-off `--migrate` container without recreating the app or touching the main lab database.
+No step needs to be adjacent to another: the renewal-enabled service renews on every minimum
+interval for the life of the lab and can take over the shared target deployment path at any
+moment, so `verify.sh` derives its renewal and fingerprint assertions from live state — the
+release that currently owns `/etc/trustforge-demo/current` and the measured gaps between
+renewals — rather than assuming the last recorded job still owns it.
+`verify.sh` includes expiry-reminder, audit-export and (when those drills
 ran) backup/restore, notification and migration-upgrade sections.
+
+### 7.1 Real CA and real target acceptance (`dev/acceptance/`)
+
+The lab proves the pipeline on disposable containers; `dev/acceptance/` repeats §7's
+issuance, deployment-verification and revocation procedures against **your** CA and **your**
+targets. `preflight.sh` is read-only and validates every external input before an ACME order
+exists (CA directory over TLS pinned to the root, `revokeCert` present, CRL decodable with a
+future `nextUpdate`, EC P-256 account key, API readiness, token audience plus `PlatformAdmin`,
+Technitium token permission on the challenge zone, SAN/zone containment, target reachability and
+pinned host key). `drill.sh` then registers each inventory host, drives one real DNS-01 issuance to
+`Active` + `Healthy`, compares the certificate the target is actually serving against the job's
+fingerprint, revokes only the certificate it minted, replays the `Idempotency-Key` to prove no
+second CA call, and waits for the serial on the CRL.
+
+Two premises that the lab alone cannot settle:
+
+- the target-side registration `/etc/trustforge/services/<GUID without dashes>.json` can only be
+  written **after** `POST /api/v1/services` returns the GUID, and `validate` executes the registered
+  health action — so `connection-test` legitimately fails before the service is serving TLS on those
+  paths;
+- CRL publication latency is a CA setting, not a TrustForge one: step-ca serves `/1.0/crl` only with
+  a `crl` block in its provisioner JSON, and a revoked serial appears promptly only when
+  `generateOnRevoke` is true. Without it, raise `TF_CRL_PROPAGATION_SECONDS` to the CA's own renewal
+  interval instead of reading the timeout as a lost revocation.
+
+Verified on 2026-11-23 against `dev/acme-lab` as the "real" environment (step-ca 0.30.2, real
+Technitium DNS, real SSH target): `preflight.sh` 42 PASS / 0 FAIL of 42, `drill.sh` 12 PASS / 0 FAIL
+of 12, and `dev/acme-lab/verify.sh` afterwards 111 PASS / 0 FAIL / 0 SKIP — the drill left no
+background renewals and the target serving a valid certificate. See `dev/acceptance/README.md` for
+the target-side and control-plane prerequisites.

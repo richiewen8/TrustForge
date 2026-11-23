@@ -9,6 +9,11 @@
 .env.trustforge
 .env
 dev/acme-lab/secrets/
+# Real-environment acceptance inputs and reports: operator configuration, never committed.
+dev/acceptance/*.env
+dev/acceptance/hosts.json
+dev/acceptance/secrets/
+dev/acceptance/out/
 
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs
