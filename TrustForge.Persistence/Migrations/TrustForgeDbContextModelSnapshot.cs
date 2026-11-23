@@ -501,6 +501,112 @@ namespace TrustForge.Persistence.Migrations
                         });
                 });
 
+            modelBuilder.Entity("TrustForge.Persistence.Revocation.CertificateRevocationRecord", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<int>("AttemptCount")
+                        .HasColumnType("integer")
+                        .HasColumnName("attempt_count");
+
+                    b.Property<string>("Fingerprint")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("fingerprint");
+
+                    b.Property<string>("IdempotencyKey")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasColumnName("idempotency_key");
+
+                    b.Property<Guid>("JobId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("job_id");
+
+                    b.Property<string>("LastError")
+                        .HasColumnType("text")
+                        .HasColumnName("last_error");
+
+                    b.Property<DateTimeOffset?>("NextAttemptAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("next_attempt_at");
+
+                    b.Property<string>("Reason")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("reason");
+
+                    b.Property<DateTimeOffset>("RequestedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("requested_at");
+
+                    b.Property<string>("RequestedBy")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)")
+                        .HasColumnName("requested_by");
+
+                    b.Property<DateTimeOffset?>("RevokedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("revoked_at");
+
+                    b.Property<string>("Serial")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("serial");
+
+                    b.Property<Guid>("ServiceId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("service_id");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("state");
+
+                    b.HasKey("Id")
+                        .HasName("pk_certificate_revocations");
+
+                    b.HasIndex("IdempotencyKey")
+                        .IsUnique()
+                        .HasDatabaseName("ux_certificate_revocations_idempotency");
+
+                    b.HasIndex("JobId")
+                        .HasDatabaseName("ix_certificate_revocations_job_id");
+
+                    b.HasIndex("Serial")
+                        .IsUnique()
+                        .HasDatabaseName("ux_certificate_revocations_live_serial")
+                        .HasFilter("state <> 'Failed'");
+
+                    b.HasIndex("ServiceId", "RequestedAt")
+                        .IsDescending(false, true)
+                        .HasDatabaseName("ix_certificate_revocations_service_requested");
+
+                    b.HasIndex("State", "NextAttemptAt", "RequestedAt")
+                        .HasDatabaseName("ix_certificate_revocations_due");
+
+                    b.ToTable("certificate_revocations", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_certificate_revocations_attempt_count_nonnegative", "attempt_count >= 0");
+
+                            t.HasCheckConstraint("ck_certificate_revocations_failed_error", "state <> 'Failed' OR last_error IS NOT NULL");
+
+                            t.HasCheckConstraint("ck_certificate_revocations_reason", "reason IN ('Unspecified','KeyCompromise','CaCompromise','AffiliationChanged','Superseded','CessationOfOperation')");
+
+                            t.HasCheckConstraint("ck_certificate_revocations_revoked_at", "state = 'Revoked' OR revoked_at IS NULL");
+
+                            t.HasCheckConstraint("ck_certificate_revocations_state", "state IN ('Pending','Revoked','Failed')");
+                        });
+                });
+
             modelBuilder.Entity("TrustForge.Persistence.CertificateAlerts.CertificateAlertRecord", b =>
                 {
                     b.HasOne("TrustForge.Persistence.CertificateJobs.CertificateJobRecord", null)
@@ -543,6 +649,23 @@ namespace TrustForge.Persistence.Migrations
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired()
                         .HasConstraintName("fk_deployment_versions_managed_services");
+                });
+
+            modelBuilder.Entity("TrustForge.Persistence.Revocation.CertificateRevocationRecord", b =>
+                {
+                    b.HasOne("TrustForge.Persistence.CertificateJobs.CertificateJobRecord", null)
+                        .WithMany()
+                        .HasForeignKey("JobId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
+                        .HasConstraintName("fk_certificate_revocations_certificate_jobs");
+
+                    b.HasOne("TrustForge.Persistence.ManagedServices.ManagedServiceRecord", null)
+                        .WithMany()
+                        .HasForeignKey("ServiceId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
+                        .HasConstraintName("fk_certificate_revocations_managed_services");
                 });
 
             modelBuilder.Entity("TrustForge.Persistence.CertificateJobs.CertificateJobRecord", b =>

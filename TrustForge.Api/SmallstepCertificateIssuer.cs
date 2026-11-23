@@ -343,7 +343,7 @@ public sealed class SmallstepCertificateIssuer(
         }
     }
 
-    private static bool ValidateServerCertificate(
+    internal static bool ValidateServerCertificate(
         X509Certificate? certificate,
         X509Chain? presentedChain,
         SslPolicyErrors errors,

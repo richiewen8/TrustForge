@@ -46,6 +46,34 @@ echo "== Starting postgres, step-ca and target =="
 compose up -d --build postgres step-ca target
 wait_for "step-ca health" 90 compose exec -T step-ca step ca health
 
+echo "== Enabling CRL distribution on step-ca =="
+# step-ca ships with CRL generation disabled, which makes revocation invisible to relying parties;
+# the revocation drill asserts the revoked serial appears in the CRL, so the lab turns it on.
+if ! compose exec -T step-ca sh -c 'grep -q "\"crl\"" /home/step/config/ca.json'; then
+    ca_json="$(mktemp)"
+    compose cp step-ca:/home/step/config/ca.json "$ca_json" >/dev/null
+    # The container has no python, so the config is rewritten on the host and copied back.
+    python -c '
+import json, sys
+path = sys.argv[1]
+config = json.load(open(path))
+config["crl"] = {
+    "enabled": True,
+    "generateOnRevoke": True,
+    "cacheDuration": "3600s",
+    "renewPeriod": "600s",
+    "idpURL": "https://step-ca:9000/1.0/crl",
+}
+json.dump(config, open(path, "w"), indent=2)
+' "$ca_json"
+    compose cp "$ca_json" step-ca:/home/step/config/ca.json >/dev/null
+    rm -f "$ca_json"
+    compose restart step-ca >/dev/null
+    wait_for "step-ca health after CRL enable" 90 compose exec -T step-ca step ca health
+fi
+wait_for "CRL endpoint" 30 compose exec -T step-ca sh -c \
+    'test -n "$(wget -qO- --no-check-certificate https://localhost:9000/1.0/crl)"'
+
 if [ ! -f secrets/root_ca.crt ]; then
     compose cp step-ca:/home/step/certs/root_ca.crt secrets/root_ca.crt
 fi

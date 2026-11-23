@@ -123,6 +123,11 @@ if not found:
 open("secrets/upgrade-baseline.sql", "w", encoding="utf-8").write("".join(out))' "$BASELINE_MIGRATION"
 assert_eq "baseline script embeds 5 history INSERTs" 5 \
     "$(grep -c 'INSERT INTO "__EFMigrationsHistory"' "$BASELINE_SQL" | tr -d '[:space:]')"
+# Derived from the generated script rather than hard-coded, so a new migration cannot silently
+# turn this drill's "complete" assertion into a stale expectation.
+TOTAL_HISTORY=$(grep -c 'INSERT INTO "__EFMigrationsHistory"' secrets/upgrade-full.sql | tr -d '[:space:]')
+POST_BASELINE_COUNT=$((TOTAL_HISTORY - 5))
+echo "  ok: schema has $TOTAL_HISTORY migrations, $POST_BASELINE_COUNT after the baseline"
 
 echo "== Creating $UPG_DB at the baseline =="
 reset_db "$UPG_DB"
@@ -215,9 +220,9 @@ if ! run_migrator "$UPG_DB" secrets/upgrade-migrate.log; then
 fi
 
 echo "== Asserting data preservation and the new schema =="
-assert_eq "history now complete" 7 "$(upg_query 'SELECT count(*) FROM "__EFMigrationsHistory"')"
-assert_eq "both new migrations recorded" 2 \
-    "$(upg_query "SELECT count(*) FROM \"__EFMigrationsHistory\" WHERE \"MigrationId\" IN ('202611150002_RenewalAndActiveJobGuard','202611150003_ExpiryReminders')")"
+assert_eq "history now complete" "$TOTAL_HISTORY" "$(upg_query 'SELECT count(*) FROM "__EFMigrationsHistory"')"
+assert_eq "every post-baseline migration recorded" "$POST_BASELINE_COUNT" \
+    "$(upg_query "SELECT count(*) FROM \"__EFMigrationsHistory\" WHERE \"MigrationId\" > '$BASELINE_MIGRATION'")"
 assert_eq "services preserved" 2 "$(upg_query 'SELECT count(*) FROM managed_services')"
 assert_eq "jobs preserved" 5 "$(upg_query 'SELECT count(*) FROM certificate_jobs')"
 assert_eq "transitions preserved" 10 "$(upg_query 'SELECT count(*) FROM certificate_job_transitions')"
@@ -235,6 +240,14 @@ assert_eq "alerts job_id index is now PARTIAL" 1 \
     "$(upg_query "SELECT count(*) FROM pg_indexes WHERE indexname='ux_certificate_alerts_job_id' AND indexdef LIKE '%job_id IS NOT NULL%'")"
 assert_eq "identity check constraint present" 1 \
     "$(upg_query "SELECT count(*) FROM pg_constraint WHERE conname='ck_certificate_alerts_identity' AND contype='c'")"
+assert_eq "revocation table created by the upgrade" 1 \
+    "$(upg_query "SELECT count(*) FROM information_schema.tables WHERE table_name='certificate_revocations'")"
+assert_eq "revocation indexes created by the upgrade" 2 \
+    "$(upg_query "SELECT count(*) FROM pg_indexes WHERE indexname IN ('ix_certificate_revocations_due','ux_certificate_revocations_idempotency')")"
+assert_eq "live-serial guard is PARTIAL (one live row per serial, Failed rows excluded)" 1 \
+    "$(upg_query "SELECT count(*) FROM pg_indexes WHERE indexname='ux_certificate_revocations_live_serial' AND indexdef LIKE '%::text <> ''Failed''%'")"
+assert_eq "revocation foreign keys present" 2 \
+    "$(upg_query "SELECT count(*) FROM pg_constraint WHERE conname IN ('fk_certificate_revocations_certificate_jobs','fk_certificate_revocations_managed_services') AND contype='f'")"
 assert_eq "checkpoint JSON preserved" "rel-a-0002" \
     "$(upg_query "SELECT execution_checkpoint->>'DeploymentReleaseId' FROM certificate_jobs WHERE id='a0000000-0000-4000-8000-000000000001'")"
 assert_eq "alert job_id preserved" "a0000000-0000-4000-8000-000000000002" \
@@ -251,7 +264,7 @@ if ! run_migrator "$UPG_DB" secrets/upgrade-migrate-2.log; then
     echo "Second --migrate run failed; see secrets/upgrade-migrate-2.log" >&2
     exit 1
 fi
-assert_eq "history unchanged after re-run" 7 "$(upg_query 'SELECT count(*) FROM "__EFMigrationsHistory"')"
+assert_eq "history unchanged after re-run" "$TOTAL_HISTORY" "$(upg_query 'SELECT count(*) FROM "__EFMigrationsHistory"')"
 assert_eq "jobs unchanged after re-run" 5 "$(upg_query 'SELECT count(*) FROM certificate_jobs')"
 
 echo "== New-shape expiry reminders (job_id NULL + dedupe_key) =="

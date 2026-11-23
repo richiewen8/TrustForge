@@ -7,12 +7,14 @@ using TrustForge.Core.DeploymentVersions;
 using TrustForge.Core.Expiry;
 using TrustForge.Core.ManagedServices;
 using TrustForge.Core.Renewal;
+using TrustForge.Core.Revocation;
 using TrustForge.Persistence.CertificateAlerts;
 using TrustForge.Persistence.CertificateJobs;
 using TrustForge.Persistence.DeploymentVersions;
 using TrustForge.Persistence.Expiry;
 using TrustForge.Persistence.ManagedServices;
 using TrustForge.Persistence.Renewal;
+using TrustForge.Persistence.Revocation;
 
 namespace TrustForge.Persistence;
 
@@ -31,6 +33,7 @@ public static class PersistenceServiceCollectionExtensions
         services.AddScoped<ICertificateAlertStore, PostgresCertificateAlertStore>();
         services.AddScoped<IRenewalCandidateStore, PostgresRenewalCandidateStore>();
         services.AddScoped<IExpiryCandidateStore, PostgresExpiryCandidateStore>();
+        services.AddScoped<ICertificateRevocationStore, PostgresCertificateRevocationStore>();
         services.AddScoped<TrustForgeDatabaseMigrator>();
         services.AddSingleton<IJobSubmissionChannel>(sp =>
             new PostgresJobSubmissionChannel(connectionString, sp.GetRequiredService<ILogger<PostgresJobSubmissionChannel>>()));

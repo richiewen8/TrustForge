@@ -151,7 +151,7 @@ TrustForge 以 Technitium DNS Server 为 DNS 基座，逐步建设面向企业�
 - 建议采用 Npgsql + EF Core migrations；状态迁移、幂等键唯一约束和乐观并发更新必须由数据库事务/约束保证。Worker 领取任务使用数据库可恢复的租约/锁，避免进程重启后丢失任务或多 Worker 重复执行。
 - **CA 签发采用 Smallstep `step-ca` + 标准 ACME。** TrustForge 实现 ACME 客户端/编排适配器，不依赖 `step-ca` 私有签发接口；证书签发、续期等尽量沿用协议标准和互操作生态。
 - 内网 DNS 名称首选 ACME DNS-01：TrustForge 通过最小权限 Technitium DNS 适配器创建、验证并清理 `_acme-challenge` TXT 记录；HTTP-01 等挑战类型可作为后续按网络条件增加的适配器。
-- CA ACME 端点、ACME 账户凭据/密钥、EAB 凭据（若部署策略要求）均通过秘密管理后端引用；ACME 账户密钥与目标服务私钥分离。step-ca 的 ACME Provisioner 不提供吊销能力，吊销应后续通过单独的受控 CA 管理通道实现，不假设 ACME 客户端可完成吊销。
+- CA ACME 端点、ACME 账户凭据/密钥、EAB 凭据（若部署策略要求）均通过秘密管理后端引用；ACME 账户密钥与目标服务私钥分离。（前提更正：原文「step-ca 的 ACME Provisioner 不提供吊销能力」不成立。step-ca v0.30.2 的 ACME directory 已暴露并默认启用 RFC 8555 §7.6 `revokeCert`，实验室以签发账户密钥实测吊销成功且序列号进入 CRL。授权面仅认「签发账户」，故吊销通道复用 `SmallstepAcme:AccountKeySecretRef` 指向的同一账户密钥，目标主机私钥无需参与、也永不离开目标主机；Admin API 无吊销端点，`step ca revoke` 需 JWK provisioner token 或 mTLS，不适合作为服务侧通道。因此「单独的受控 CA 管理通道」即为 ACME 账户密钥通道，详见 `CERTIFICATE-PIPELINE.md`「Revocation and CRL distribution」。）
 - 为 DNS 操作实现独立适配器接口，避免业务代码依赖 Technitium 内部实现细节。
 - CA 签名抽象提供 `Sign`、`GetPublicCertificate`、`GetCapabilities` 等窄接口，密钥引用与密码学操作分离。
 - 所有签发与 DNS 变更采用可追踪任务 ID、幂等键、结构化结果和审计事件。

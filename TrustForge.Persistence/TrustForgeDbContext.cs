@@ -3,6 +3,7 @@ using TrustForge.Persistence.CertificateAlerts;
 using TrustForge.Persistence.CertificateJobs;
 using TrustForge.Persistence.DeploymentVersions;
 using TrustForge.Persistence.ManagedServices;
+using TrustForge.Persistence.Revocation;
 
 namespace TrustForge.Persistence;
 
@@ -13,6 +14,7 @@ public sealed class TrustForgeDbContext(DbContextOptions<TrustForgeDbContext> op
     internal DbSet<ManagedServiceRecord> ManagedServices => Set<ManagedServiceRecord>();
     internal DbSet<DeploymentVersionRecord> DeploymentVersions => Set<DeploymentVersionRecord>();
     internal DbSet<CertificateAlertRecord> CertificateAlerts => Set<CertificateAlertRecord>();
+    internal DbSet<CertificateRevocationRecord> CertificateRevocations => Set<CertificateRevocationRecord>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -196,6 +198,61 @@ public sealed class TrustForgeDbContext(DbContextOptions<TrustForgeDbContext> op
                 .HasForeignKey(alert => alert.ServiceId)
                 .OnDelete(DeleteBehavior.Cascade)
                 .HasConstraintName("fk_certificate_alerts_managed_services");
+        });
+
+        modelBuilder.Entity<CertificateRevocationRecord>(entity =>
+        {
+            entity.ToTable("certificate_revocations", table =>
+            {
+                table.HasCheckConstraint("ck_certificate_revocations_state", "state IN ('Pending','Revoked','Failed')");
+                table.HasCheckConstraint("ck_certificate_revocations_reason", "reason IN ('Unspecified','KeyCompromise','CaCompromise','AffiliationChanged','Superseded','CessationOfOperation')");
+                table.HasCheckConstraint("ck_certificate_revocations_attempt_count_nonnegative", "attempt_count >= 0");
+                table.HasCheckConstraint("ck_certificate_revocations_revoked_at", "state = 'Revoked' OR revoked_at IS NULL");
+                table.HasCheckConstraint("ck_certificate_revocations_failed_error", "state <> 'Failed' OR last_error IS NOT NULL");
+            });
+            entity.HasKey(revocation => revocation.Id).HasName("pk_certificate_revocations");
+            entity.Property(revocation => revocation.Id).HasColumnName("id").ValueGeneratedNever();
+            entity.Property(revocation => revocation.ServiceId).HasColumnName("service_id").IsRequired();
+            entity.Property(revocation => revocation.JobId).HasColumnName("job_id").IsRequired();
+            entity.Property(revocation => revocation.Fingerprint).HasColumnName("fingerprint").HasMaxLength(64).IsRequired();
+            entity.Property(revocation => revocation.Serial).HasColumnName("serial").HasMaxLength(64).IsRequired();
+            entity.Property(revocation => revocation.Reason).HasColumnName("reason").HasMaxLength(32).IsRequired();
+            entity.Property(revocation => revocation.RequestedBy).HasColumnName("requested_by").HasMaxLength(256).IsRequired();
+            entity.Property(revocation => revocation.IdempotencyKey).HasColumnName("idempotency_key").HasMaxLength(200).IsRequired();
+            entity.Property(revocation => revocation.RequestedAt).HasColumnName("requested_at").IsRequired();
+            entity.Property(revocation => revocation.State).HasColumnName("state").HasMaxLength(16).IsRequired();
+            entity.Property(revocation => revocation.AttemptCount).HasColumnName("attempt_count").IsRequired();
+            entity.Property(revocation => revocation.RevokedAt).HasColumnName("revoked_at");
+            entity.Property(revocation => revocation.NextAttemptAt).HasColumnName("next_attempt_at");
+            entity.Property(revocation => revocation.LastError).HasColumnName("last_error");
+
+            entity.HasIndex(revocation => revocation.JobId)
+                .HasDatabaseName("ix_certificate_revocations_job_id");
+            entity.HasIndex(revocation => revocation.IdempotencyKey)
+                .IsUnique()
+                .HasDatabaseName("ux_certificate_revocations_idempotency");
+            // Revocation is permanent, so one certificate may only hold one live revocation record; a
+            // terminally Failed attempt stays out of the index so an operator can retry.
+            entity.HasIndex(revocation => revocation.Serial)
+                .IsUnique()
+                .HasDatabaseName("ux_certificate_revocations_live_serial")
+                .HasFilter("state <> 'Failed'");
+            entity.HasIndex(revocation => new { revocation.ServiceId, revocation.RequestedAt })
+                .IsDescending(false, true)
+                .HasDatabaseName("ix_certificate_revocations_service_requested");
+            entity.HasIndex(revocation => new { revocation.State, revocation.NextAttemptAt, revocation.RequestedAt })
+                .HasDatabaseName("ix_certificate_revocations_due");
+
+            entity.HasOne<CertificateJobRecord>()
+                .WithMany()
+                .HasForeignKey(revocation => revocation.JobId)
+                .OnDelete(DeleteBehavior.Cascade)
+                .HasConstraintName("fk_certificate_revocations_certificate_jobs");
+            entity.HasOne<ManagedServiceRecord>()
+                .WithMany()
+                .HasForeignKey(revocation => revocation.ServiceId)
+                .OnDelete(DeleteBehavior.Cascade)
+                .HasConstraintName("fk_certificate_revocations_managed_services");
         });
     }
 }

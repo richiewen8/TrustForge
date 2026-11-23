@@ -37,23 +37,33 @@ cd dev/acme-lab
 ./drill-notification.sh # Phase 3 drill: LISTEN/NOTIFY transactional wake A/B vs polling
 ./drill-migration.sh    # Phase 1 drill: real old-schema → new-schema upgrade on seeded data
 ./drill-renewal.sh      # Phase 6 drills: concurrency guard, automatic renewal
-./verify.sh             # asserts the Phase 4/5/6 completion conditions
+./drill-revocation.sh   # Phase 7 drills: CRL precondition, RBAC, real ACME revocation, retry
+./verify.sh             # asserts the Phase 4/5/6/7 completion conditions
 ```
 
 Run the drills in this order. Backup/restore runs **before** `drill-renewal.sh` so the
 renewal-enabled service is registered fresh after the restore. `drill-notification.sh` also
 runs **before** `drill-renewal.sh`: it recreates the app with a 30s poll interval for the A/B
-measurement and restores the base config when it finishes, leaving Keycloak ready. Keeping
-`drill-renewal.sh` → `verify.sh` adjacent matters because `verify.sh` must run immediately
-after `drill-renewal.sh` (within the 2-minute minimum renewal interval), otherwise the
-scheduler issues another renewal and the renewal/served-certificate assertions drift.
+measurement and restores the base config when it finishes, leaving Keycloak ready.
+`verify.sh` needs no adjacency to the drills any more: the renewal-enabled service keeps renewing
+every 2 minutes for the rest of the lab's life and can win the shared deployment path at any
+moment, so `verify.sh` resolves the *current* release from the target (`releases/<service>/<job>`)
+and derives its renewal and fingerprint assertions from live state instead of assuming the last
+recorded job still owns the path. It asserts the rate guarantees (renewals at least
+`MinimumRenewalInterval` apart, no fingerprint renewed twice) rather than a wall-clock-lucky
+"exactly one renewal exists".
 Running notification before renewal also puts its `notificationDrill` result in
 `lab-state.json` before `verify.sh`, so the notification section is exercised.
 `drill-migration.sh` runs **before** `drill-renewal.sh` as well: it upgrades disposable side
 databases (`trustforge_upgrade` / `trustforge_upgrade_bad`) through a one-off `--migrate`
 container, never recreating the app or touching the main lab database, so it leaves the
 renewal → verify window intact and puts its `migrationDrill` result in `lab-state.json` for
-`verify.sh`.
+`verify.sh`. `drill-revocation.sh` runs **after** `drill-renewal.sh` — it needs a lab with a
+deployed, currently-served certificate to revoke — and it ends by handing the shared
+`/etc/trustforge-demo/current` symlink back to a fresh `svc1` deployment, because its own serial
+assertions read that path and a renewal-enabled service may otherwise replace it mid-drill.
+`verify.sh` itself no longer depends on the ordering: it derives the deployed certificate from
+whichever release owns the path (see above).
 
 `setup.sh` builds the images, initializes the CA, extracts the root certificate, generates
 the ACME account key and the deployer SSH key, creates the `trustforge.lab` zone with a
@@ -96,9 +106,14 @@ retention outcome.
    certificate is always inside the renewal window), bootstraps it with a manual job, then
    waits for the `RenewalSchedulerWorker` to create exactly one `renewal-scheduler` job. The
    renewal job must succeed, record `certificateNotAfter` on its deployment version, supersede
-   the bootstrap version, and not be re-issued on subsequent scans (the
-   `CertificateJobs__Renewal__MinimumRenewalInterval=00:02:00` floor plus the fingerprint
-   idempotency key `renewal-{fingerprint}` prevent a renewal loop).
+   the bootstrap version, and not be re-issued on the scans that follow it immediately (the
+   `CertificateJobs__Renewal__MinimumRenewalInterval=00:02:00` floor and the fingerprint
+   idempotency key `renewal-{fingerprint}` bound the rate). The 25h lead time on 24h
+   certificates is deliberate: the service never leaves its renewal window, so the scheduler
+   keeps issuing every 2 minutes for the rest of the lab's life. `drill-renewal.sh` therefore
+   asserts "exactly one job" only at its own moment, and `verify.sh` asserts the durable
+   guarantees — successive renewals at least `MinimumRenewalInterval` apart, no fingerprint
+   renewed twice, and the newest renewal's release owning the Active version.
 
 The drill finishes with a fresh `svc1` deployment so `svc1` owns the shared
 `/etc/trustforge-demo/current` symlink again before `verify.sh` checks the served certificate.
@@ -193,13 +208,19 @@ the app, disturb Keycloak's network namespace, or race the renewal scheduler.
    Failed / Queued, one carrying a PascalCase execution checkpoint), 10 transitions, 3
    deployment versions (Superseded / Active / Staged) and 2 JobFailed alerts. No key
    material is seeded.
-3. **Upgrade** — the real `--migrate` path applies `202611150002_RenewalAndActiveJobGuard`
-   and `202611150003_ExpiryReminders`. The drill asserts history reaches 7, every seeded
+3. **Upgrade** — the real `--migrate` path applies every migration after
+   `202611150001_DeploymentVersionsAndAlerts`: `202611150002_RenewalAndActiveJobGuard`,
+   `202611150003_ExpiryReminders` and `20261123125511_CertificateRevocations`. The expected
+   history total is derived from the generated script, so a new migration cannot leave the
+   assertion stale. The drill asserts history reaches that total, every seeded
    row count is preserved, existing rows take the new column defaults (`renewal_enabled`
-   false, `renewal_lead_time` 0, `certificate_not_after` NULL), the three new indexes and
+   false, `renewal_lead_time` 0, `certificate_not_after` NULL), the three alert/job indexes and
    the `ck_certificate_alerts_identity` check exist, the alerts `job_id` index is now
-   *partial*, and the checkpoint JSON survives intact.
-4. **Idempotency** — re-running `--migrate` is a no-op (history stays 7, jobs stay 5).
+   *partial*, the `certificate_revocations` table arrives with its FKs, its due/idempotency
+   indexes and a *partial* `ux_certificate_revocations_live_serial` (`WHERE state <> 'Failed'`),
+   and the checkpoint JSON survives intact.
+4. **Idempotency** — re-running `--migrate` is a no-op (history stays at the derived total,
+   jobs stay 5).
 5. **New-shape writes** — two expiry-reminder alerts with `job_id NULL` + distinct
    `dedupe_key` are accepted (the partial unique index allows many NULL `job_id`s); a
    duplicate `dedupe_key` is rejected by `ux_certificate_alerts_dedupe_key` and an alert
@@ -214,8 +235,64 @@ Both side databases are dropped at the end (hard-coded names only). The baseline
 and migrator logs stay in gitignored `secrets/` as evidence, and `migrationDrill`
 (baseline/target migration IDs, preserved row counts, `idempotent`, `guardRejected`,
 `dedupeRejected`, `identityRejected`) is recorded in `lab-state.json`. `verify.sh` re-checks
-those values plus a live anchor that the main lab database itself is fully migrated (7
-history rows); without the entry that section is skipped.
+those values plus a live anchor that the main lab database itself is fully migrated (all 8
+current migrations); without the entry that section is skipped.
+
+## Revocation and CRL drill
+
+`drill-revocation.sh` proves the Phase 7 completion condition: revocation reaches the CA
+through a real ACME `revokeCert` call signed by the lab account key, the CA publishes it, and
+the record is durable across a CA outage. `setup.sh` must have enabled CRL generation — the
+drill starts by asserting the CA serves a CRL that carries an *Issuing Distribution Point*,
+and fails immediately if step-ca is running without the `crl` block (an unreachable CRL
+endpoint would otherwise look like a revocation bug). It then registers `svc5.trustforge.lab`
+(`demo-tls-revocation`), writes its target registration and adds its Technitium A record, and
+bootstraps it with a manual job so a real certificate is deployed and served.
+
+1. **RBAC** — anonymous `POST /api/v1/services/{id}/revocations` is 401; the realm-imported
+   `trustforge-cert-operator` user (password `LAB_OIDC_DEV_PASSWORD`) holds
+   `CertificateOperator` but not `PlatformAdmin` and is **403** on the revocation POST while
+   keeping 200 reads and 202 issuance. Revocation is deliberately narrower than issuance.
+   That user comes from the Keycloak realm import (`TrustForge.Api/keycloak`), and `start-dev`
+   keeps its H2 database inside the container, so a container that was created before the user
+   existed must be recreated to re-import the realm
+   (`compose up -d --force-recreate keycloak`, then wait for the realm endpoint) or step 1 fails
+   with "does not hold CertificateOperator".
+2. **Request validation and conflicts** — a missing `Idempotency-Key` and an unknown reason are
+   400; a service with no active deployment is 409 `no_active_certificate`. The 409
+   `service_job_active` guard is also probed against a job that was just created, but that
+   window closes as the worker picks the job up, so the drill prints a NOTE instead of failing
+   when it has already closed; `drill-renewal.sh` asserts the same guard deterministically.
+3. **Real ACME revocation** — `POST` with `KeyCompromise` returns 200 `status: revoked` and a
+   record whose `serial` equals the deployed certificate's CA-side serial (leading `00` DER pad
+   stripped, so it matches `openssl`/CRL output), with `jobId`, `reason`, `requestedBy` (token
+   `sub`) and `revokedAt` recorded.
+4. **CRL distribution** — `lab-crl.sh` fetches `https://127.0.0.1:9000/1.0/crl` with full TLS
+   verification against `secrets/root_ca.crt` (`server_hostname=step-ca`, nothing relaxed) and
+   the serial must appear with reason `Key Compromise`.
+5. **Audit** — exactly one delivered `CertificateRevoked` alert per serial, Critical for
+   `KeyCompromise` and Warning for `Unspecified`, deduped on `revoked:{serial}`.
+6. **Replay** — the same `Idempotency-Key` returns the same record, and a *fresh* key for the
+   same serial also replays it (the live-serial guard), so the CA is never asked twice.
+7. **Durable retry** — after re-issuing (new serial, proving revocation does not poison later
+   issuance), `step-ca` is stopped and the replacement certificate is revoked: the request
+   returns 202 `status: pending` with the row `Pending`. Restarting the CA lets
+   `RevocationRetryWorker` finish it: `Revoked`, one row for that serial, `lastError` cleared,
+   serial in the CRL, Warning alert, and no `RevocationFailed` give-up alert. A freshly queued
+   row has `next_attempt_at IS NULL`, so it is instantly claimable and the inline attempt can
+   lose the optimistic-concurrency guard to the worker; the drill asserts the row is Pending
+   with a trace of the failure (an attempt count or a recorded error), not which writer made it.
+8. **No collateral damage** — `svc1`'s active serial is absent from the CRL throughout, and the
+   scoped audit export (`GET /api/v1/audit/export?serviceId=…`) carries both svc5 revocations
+   and none of another service's.
+
+The drill ends with a fresh `svc1` deployment so `svc1` owns the shared
+`/etc/trustforge-demo/current` symlink again before `verify.sh` reads the served certificate,
+and records `revocationDrill{serviceId, revocationId, serial, retryRevocationId, retrySerial,
+unaffectedSerial, finalSvc1Serial, operatorUsername}` plus the new `jobId` in `lab-state.json`.
+`verify.sh` re-checks those values — the CRL entries, record states, RBAC codes, alert severity
+and replay — and scopes its "no revocation abandoned as `Failed`" and "no give-up alert"
+invariants to the drill service, because the lab keeps the history of earlier runs.
 
 ## Expiry reminders and audit export
 
@@ -255,3 +332,10 @@ history rows); without the entry that section is skipped.
   rebuild) invalidates Keycloak's shared network namespace: `docker compose restart
   keycloak` then fails with a stale-netns error. Use `docker compose up -d keycloak` to
   recreate it against the new namespace.
+- `setup.sh` enables step-ca CRL generation (`ca.json` `crl` block) idempotently and restarts
+  the CA; without it revocations are recorded by the CA but never published, and
+  `drill-revocation.sh` fails its precondition on purpose rather than reporting a false pass.
+- The scripts set `MSYS_NO_PATHCONV=1` so Git Bash leaves container paths (`/etc/...`) alone.
+  That also stops MSYS from rewriting `-o /dev/null`: the native Windows `curl.exe` then tries
+  to write a literal `/dev/null` and exits 23. Status-code probes therefore pipe the body away
+  (`http_code` in `drill-revocation.sh` / `verify.sh`) instead of using `-o`.

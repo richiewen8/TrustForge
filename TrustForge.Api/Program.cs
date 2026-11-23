@@ -9,6 +9,7 @@ using TrustForge.Core.CertificateAlerts;
 using TrustForge.Core.CertificateJobs;
 using TrustForge.Core.DeploymentVersions;
 using TrustForge.Core.ManagedServices;
+using TrustForge.Core.Revocation;
 using TrustForge.Core.Security;
 using TrustForge.Persistence;
 using TrustForge.Api;
@@ -35,6 +36,18 @@ builder.Services.Configure<CertificateExpiryOptions>(builder.Configuration.GetSe
 builder.Services.Configure<CertificateDeploymentOptions>(builder.Configuration.GetSection("CertificateJobs:Deployment"));
 bool runMigrations = args.Contains("--migrate", StringComparer.Ordinal);
 bool simulationEnabled = builder.Configuration.GetValue<bool>("CertificateJobs:Simulation:Enabled");
+builder.Services.Configure<CertificateRevocationOptions>(builder.Configuration.GetSection("CertificateJobs:Revocation"));
+builder.Services.AddScoped<ICertificateRevocationChannel, SmallstepCertificateRevoker>();
+builder.Services.AddScoped<CertificateRevocationService>();
+string artifactDirectory = builder.Configuration["CertificateJobs:Artifacts:Directory"]
+    ?? "/var/lib/trustforge/artifacts";
+if (!Path.IsPathFullyQualified(artifactDirectory))
+    throw new InvalidOperationException("CertificateJobs:Artifacts:Directory must be an absolute path on the persistent application volume.");
+// Revocation reads stored certificate material on the API request path, not only inside the worker.
+builder.Services.AddSingleton<ICertificateArtifactStore>(new FileCertificateArtifactStore(artifactDirectory));
+builder.Services.AddSingleton<IssuedCertificateValidator>();
+if (!runMigrations && builder.Configuration.GetValue("CertificateJobs:Revocation:Enabled", true))
+    builder.Services.AddHostedService<RevocationRetryWorker>();
 if (simulationEnabled && !runMigrations)
 {
     if (!builder.Environment.IsDevelopment())
@@ -45,12 +58,6 @@ if ((builder.Configuration.GetValue<bool>("CertificateJobs:Worker:Enabled") || s
 {
     if (builder.Configuration.GetValue<bool>("CertificateJobs:Worker:Enabled") && !simulationEnabled)
     {
-        string artifactDirectory = builder.Configuration["CertificateJobs:Artifacts:Directory"]
-            ?? "/var/lib/trustforge/artifacts";
-        if (!Path.IsPathFullyQualified(artifactDirectory))
-            throw new InvalidOperationException("CertificateJobs:Artifacts:Directory must be an absolute path on the persistent application volume.");
-        builder.Services.AddSingleton<ICertificateArtifactStore>(new FileCertificateArtifactStore(artifactDirectory));
-        builder.Services.AddSingleton<IssuedCertificateValidator>();
         builder.Services.AddScoped<ICertificateJobProcessor, CertificatePipelineProcessor>();
     }
     if (!builder.Services.Any(descriptor => descriptor.ServiceType == typeof(ICertificateJobProcessor)))
@@ -105,6 +112,8 @@ builder.Services.AddAuthorization(options =>
     options.FallbackPolicy = new AuthorizationPolicyBuilder().RequireAuthenticatedUser().Build();
     options.AddPolicy("CertificateOperator", policy => policy.RequireRole("PlatformAdmin", "CertificateOperator"));
     options.AddPolicy("CertificateReader", policy => policy.RequireRole("PlatformAdmin", "CertificateOperator", "Auditor"));
+    // Revocation is irreversible for a certificate, so it stays narrower than ordinary issuance rights.
+    options.AddPolicy("CertificateRevoker", policy => policy.RequireRole("PlatformAdmin"));
 });
 
 WebApplication app = builder.Build();
@@ -226,6 +235,7 @@ api.MapGet("/audit/export", async (
     ICertificateJobStore jobs,
     IDeploymentVersionStore versions,
     ICertificateAlertStore alerts,
+    ICertificateRevocationStore revocations,
     TimeProvider timeProvider,
     CancellationToken cancellationToken) =>
 {
@@ -236,13 +246,15 @@ api.MapGet("/audit/export", async (
     IReadOnlyList<CertificateJob> jobItems = await jobs.ListAsync(serviceId, from, to, take, cancellationToken);
     IReadOnlyList<DeploymentVersion> versionItems = await versions.ListAsync(serviceId, from, to, take, cancellationToken);
     IReadOnlyList<CertificateAlert> alertItems = await alerts.ListAsync(serviceId, null, from, to, take, cancellationToken);
+    IReadOnlyList<CertificateRevocation> revocationItems = await revocations.ListAsync(serviceId, from, to, take, cancellationToken);
     var bundle = new
     {
         generatedAt = timeProvider.GetUtcNow(),
         filters = new { serviceId, from, to, limit = take },
         jobs = jobItems,
         deploymentVersions = versionItems,
-        alerts = alertItems
+        alerts = alertItems,
+        revocations = revocationItems
     };
     return Results.Json(bundle, new JsonSerializerOptions(JsonSerializerDefaults.Web) { Converters = { new JsonStringEnumConverter() } });
 })
@@ -290,6 +302,68 @@ api.MapGet("/certificate-jobs/{id:guid}", async (
 {
     CertificateJob? job = await jobs.FindByIdAsync(id, cancellationToken);
     return job is null ? Results.NotFound() : Results.Ok(CertificateJobResponse.From(job));
+})
+.RequireAuthorization("CertificateReader");
+
+api.MapPost("/services/{id:guid}/revocations", async (
+    Guid id,
+    HttpRequest request,
+    CreateRevocationRequest body,
+    ClaimsPrincipal principal,
+    CertificateRevocationService revocations,
+    CancellationToken cancellationToken) =>
+{
+    string? subject = principal.FindFirstValue("sub");
+    if (string.IsNullOrWhiteSpace(subject))
+        return Results.Forbid();
+
+    string idempotencyKey = request.Headers["Idempotency-Key"].ToString();
+    if (string.IsNullOrWhiteSpace(idempotencyKey) || idempotencyKey.Length > 200)
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["Idempotency-Key"] = ["A key between 1 and 200 characters is required."] });
+    if (!Enum.TryParse(body.Reason, ignoreCase: false, out CertificateRevocationReason reason)
+        || !Enum.IsDefined(reason))
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["reason"] = ["reason must be Unspecified, KeyCompromise, CaCompromise, AffiliationChanged, Superseded, or CessationOfOperation."] });
+
+    RevocationResult result = await revocations.RequestAsync(id, reason, idempotencyKey.Trim(), subject, cancellationToken);
+    // Only the outcomes that reached the CA must carry a record; the conflict outcomes below legitimately have none.
+    if (result.Revocation is null && result.Status is not (RevocationStatus.ServiceNotFound or RevocationStatus.JobActive
+            or RevocationStatus.NoActiveCertificate or RevocationStatus.CertificateMaterialMissing or RevocationStatus.FingerprintMismatch))
+        return Results.Problem("The revocation record could not be read back after the CA attempt.");
+
+    CertificateRevocationResponse? payload = result.Revocation is null ? null : CertificateRevocationResponse.From(result.Revocation);
+    return result.Status switch
+    {
+        RevocationStatus.Revoked => Results.Ok(new { status = "revoked", revocation = payload }),
+        RevocationStatus.Replayed => Results.Ok(new { status = "replayed", revocation = payload }),
+        RevocationStatus.PendingRetry => Results.Accepted($"/api/v1/certificate-revocations/{result.Revocation!.Id}", new { status = "pending", revocation = payload }),
+        RevocationStatus.ServiceNotFound => Results.NotFound(),
+        RevocationStatus.JobActive => Results.Conflict(new { error = "service_job_active", jobId = result.Error }),
+        RevocationStatus.NoActiveCertificate => Results.Conflict(new { error = "no_active_certificate" }),
+        RevocationStatus.CertificateMaterialMissing => Results.Conflict(new { error = "certificate_material_missing" }),
+        RevocationStatus.FingerprintMismatch => Results.Conflict(new { error = "certificate_fingerprint_mismatch" }),
+        _ => Results.Problem("Unexpected revocation outcome.")
+    };
+})
+.RequireAuthorization("CertificateRevoker");
+
+api.MapGet("/services/{id:guid}/revocations", async (
+    Guid id,
+    int? limit,
+    ICertificateRevocationStore revocations,
+    CancellationToken cancellationToken) =>
+{
+    IReadOnlyList<CertificateRevocation> items = await revocations.ListAsync(id, null, null, limit ?? 50, cancellationToken);
+    return Results.Ok(items.Select(CertificateRevocationResponse.From).ToArray());
+})
+.RequireAuthorization("CertificateReader");
+
+api.MapGet("/certificate-revocations/{id:guid}", async (
+    Guid id,
+    ICertificateRevocationStore revocations,
+    CancellationToken cancellationToken) =>
+{
+    CertificateRevocation? revocation = await revocations.FindByIdAsync(id, cancellationToken);
+    return revocation is null ? Results.NotFound() : Results.Ok(CertificateRevocationResponse.From(revocation));
 })
 .RequireAuthorization("CertificateReader");
 
@@ -533,4 +607,27 @@ internal sealed record CertificateJobResponse(
         job.Id, job.ServiceId, job.RequestedBy, job.State.ToString(), job.Version,
         job.CertificateId, job.CertificateFingerprint, job.CreatedAt, job.FinishedAt,
         job.FailureStage, job.FailureSummary, job.Transitions);
+}
+
+internal sealed record CreateRevocationRequest(string Reason);
+
+internal sealed record CertificateRevocationResponse(
+    Guid Id,
+    Guid ServiceId,
+    Guid JobId,
+    string Fingerprint,
+    string Serial,
+    string Reason,
+    string State,
+    string RequestedBy,
+    string IdempotencyKey,
+    DateTimeOffset RequestedAt,
+    DateTimeOffset? RevokedAt,
+    int AttemptCount,
+    string? LastError)
+{
+    public static CertificateRevocationResponse From(CertificateRevocation revocation) => new(
+        revocation.Id, revocation.ServiceId, revocation.JobId, revocation.Fingerprint, revocation.Serial,
+        revocation.Reason.ToString(), revocation.State.ToString(), revocation.RequestedBy, revocation.IdempotencyKey,
+        revocation.RequestedAt, revocation.RevokedAt, revocation.AttemptCount, revocation.LastError);
 }

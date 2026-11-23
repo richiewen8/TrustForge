@@ -98,8 +98,13 @@ These are different operations:
 - Automatic renewal is per-service (`renewalEnabled`, `renewalLeadTime`). The
   `RenewalSchedulerWorker` scans every `CertificateJobs:Renewal:ScanInterval` and creates at
   most one renewal job per service per `MinimumRenewalInterval`, keyed by certificate
-  fingerprint (`renewal-{fingerprint}`). A lead time ≥ certificate lifetime is safe: the
-  minimum interval prevents a renewal loop.
+  fingerprint (`renewal-{fingerprint}`). Keep `renewalLeadTime` **below** the issued
+  certificate lifetime: a lead time ≥ lifetime leaves the service permanently inside its own
+  renewal window, so the scheduler renews continuously — one issuance every
+  `MinimumRenewalInterval` — instead of resting until the next real expiry. The interval
+  throttles that cascade; it does not prevent it. Sustained `renewal-scheduler` jobs for a
+  service that is not approaching expiry are the symptom; check its lead time against the
+  certificate lifetime.
 - Expiry reminders are independent of renewal: the `ExpiryReminderWorker` scans every
   `CertificateJobs:Expiry:ScanInterval` and raises a `CertificateExpiring` (Warning) alert
   for every enabled service whose active certificate is inside
@@ -108,6 +113,63 @@ These are different operations:
   as a safety net. Tune the window so operators have lead time to act if renewal fails.
 - Durations use the .NET constant format `d.hh:mm:ss`. **`25:00:00` parses as 25 days, not
   25 hours** — use `1.01:00:00` for 25 hours.
+
+### 2.6 Revocation and CRL distribution
+
+Enabling CRL publication on step-ca (the OSS CA ships with it **disabled**, which makes
+revocations invisible to relying parties) means adding a `crl` block to `ca.json` and
+restarting the CA:
+
+```json
+{ "crl": { "enabled": true, "generateOnRevoke": true,
+           "renewPeriod": "600s", "cacheDuration": "3600s",
+           "idpURL": "https://step-ca:9000/1.0/crl" } }
+```
+
+The list is then served by `GET /1.0/crl` on the CA port, and already-stored revocations
+appear in it after the next generation. Two CA limits to plan around: issued leaves carry
+**no** CRL Distribution Points extension even when `idpURL` is set, so relying parties must
+be pointed at the CRL URL out of band; and OSS step-ca has no OCSP responder. TrustForge's
+own deployment verification uses `X509RevocationMode.NoCheck` — it proves the chain builds
+against the configured root and matches the deployed fingerprint, while revocation status is
+asserted against the CA's CRL.
+
+To revoke:
+
+```sh
+curl -X POST "$API/api/v1/services/$SERVICE_ID/revocations" \
+  -H "Authorization: Bearer $PLATFORM_ADMIN_TOKEN" \
+  -H "Idempotency-Key: incident-2026-11-23-01" \
+  -H "Content-Type: application/json" \
+  -d '{"reason":"KeyCompromise"}'
+```
+
+- Requires the `PlatformAdmin` role: revocation is irreversible, so it is deliberately
+  narrower than issuance (`CertificateOperator`).
+- The revoked certificate is the one behind the service's `Active` deployment version, read
+  back from the stored artifact; the caller cannot name a serial. Expected outcomes are
+  `200 revoked`/`200 replayed`, `202 pending` (CA unreachable — the durable retry worker
+  finishes it), and `409 service_job_active` / `409 no_active_certificate`.
+- Re-sending with a different idempotency key replays the same record; the CA is asked at
+  most once per serial, and an `alreadyRevoked` answer is treated as success.
+- **Revoking does not touch the deployment.** The target keeps serving the revoked leaf
+  until the next issuance replaces it, so for a compromised key the sequence is revoke →
+  immediately issue (which also regenerates the target-side private key).
+- Verify at the CA, then check the audit trail:
+
+```sh
+openssl crl -in crl.der -inform DER -noout -text | grep -A2 "$SERIAL"
+curl "$API/api/v1/services/$SERVICE_ID/revocations" -H "Authorization: Bearer $TOKEN"
+```
+
+Watch for `RevocationFailed` (Critical), raised only after
+`CertificateJobs:Revocation:MaxAttempts` give-up retries; a row still `Pending` with a
+scheduled next attempt means the retry worker will keep trying (its `lastError` may be empty
+when the worker, not the request, owns the current attempt), so keep
+`CertificateJobs:Revocation:Enabled=true` wherever revocation is used. If the API itself is
+unavailable, the same CA-side revocation can be performed with the ACME account key
+configured in `SmallstepAcme:AccountKeySecretRef` against the `revokeCert` URL published by
+the ACME directory — no other authorization is accepted by step-ca.
 
 ## 3. PostgreSQL backup, restore and upgrade
 
@@ -261,6 +323,8 @@ webhook is set). Receivers must dedupe by alert `id`.
 | `DeploymentRolledBack` | Warning | Activation/verify failed; rolled back to the previous release. |
 | `RollbackFailed` | **Critical** | Rollback itself failed; manual intervention required. |
 | `CertificateExpiring` | Warning | Active certificate inside the reminder window (no job; deduped per certificate). |
+| `CertificateRevoked` | **Critical** for `KeyCompromise`/`CaCompromise`, Warning otherwise | A certificate was revoked at the CA (deduped by `revoked:{serial}`, references the issuing job). |
+| `RevocationFailed` | **Critical** | Revocation give-up after `CertificateJobs:Revocation:MaxAttempts`; the CA does not list that serial. |
 
 Delivery state machine: `Pending → Delivered`, or `Pending → Failed` after
 `CertificateJobs:Alerts:MaxAttempts` bounded-exponential retries. Query
@@ -292,6 +356,13 @@ FROM certificate_alerts
 WHERE delivery_state <> 'Delivered'
 ORDER BY occurred_at DESC;
 
+-- Revocations: pending work, give-ups, and what the CA was told
+SELECT state, reason, count(*) FROM certificate_revocations GROUP BY state, reason;
+SELECT id, serial, reason, state, attempt_count, next_attempt_at, last_error
+FROM certificate_revocations
+WHERE state = 'Pending'
+ORDER BY requested_at;
+
 -- Transactional wake listener (LISTEN/NOTIFY); 0 rows => worker is polling-only
 SELECT count(*) FROM pg_stat_activity
 WHERE application_name = 'trustforge-job-listener';
@@ -300,9 +371,10 @@ WHERE application_name = 'trustforge-job-listener';
 ### 6.4 Audit export
 
 `GET /api/v1/audit/export` (PlatformAdmin / CertificateOperator / Auditor) returns a JSON
-bundle `{generatedAt, filters, jobs, deploymentVersions, alerts}` with string-serialized
-enums, filterable by `serviceId`, `from`, `to`, `limit`. Use it for periodic compliance
-exports and incident timelines. It is read-only and reflects the durable PostgreSQL history.
+bundle `{generatedAt, filters, jobs, deploymentVersions, alerts, revocations}` with
+string-serialized enums, filterable by `serviceId`, `from`, `to`, `limit`. Use it for
+periodic compliance exports and incident timelines. It is read-only and reflects the durable
+PostgreSQL history, including who revoked which serial and why.
 
 ### 6.5 Transactional wake (LISTEN/NOTIFY)
 
@@ -336,7 +408,8 @@ cd dev/acme-lab
 ./drill-notification.sh # LISTEN/NOTIFY wake A/B (poll-bound control vs notify), restores base config
 ./drill-migration.sh    # real old→new schema upgrade on seeded side databases via --migrate
 ./drill-renewal.sh      # concurrency guard + automatic renewal
-./verify.sh             # asserts all Phase 4/5/6 completion conditions
+./drill-revocation.sh   # CRL precondition, RBAC, real ACME revocation, replay, CA-outage retry
+./verify.sh             # asserts all Phase 4/5/6/7 completion conditions
 ```
 
 Run backup/restore **before** `drill-renewal.sh`: the restore drill issues a fresh `svc1`

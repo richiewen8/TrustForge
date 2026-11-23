@@ -7,7 +7,9 @@ public enum CertificateAlertKind
     JobFailed,
     DeploymentRolledBack,
     RollbackFailed,
-    CertificateExpiring
+    CertificateExpiring,
+    CertificateRevoked,
+    RevocationFailed
 }
 
 public enum CertificateAlertSeverity
@@ -85,5 +87,51 @@ public sealed record CertificateAlert(
             null,
             null,
             $"expiring:{serviceId}:{fingerprint}");
+    }
+
+    public static CertificateAlert ForRevocation(
+        Guid serviceId,
+        Guid jobId,
+        string serial,
+        string fingerprint,
+        TrustForge.Core.Revocation.CertificateRevocationReason reason,
+        string requestedBy,
+        DateTimeOffset occurredAt)
+    {
+        bool emergency = reason is TrustForge.Core.Revocation.CertificateRevocationReason.KeyCompromise
+            or TrustForge.Core.Revocation.CertificateRevocationReason.CaCompromise;
+        return new CertificateAlert(
+            Guid.NewGuid(),
+            jobId,
+            serviceId,
+            CertificateAlertKind.CertificateRevoked,
+            emergency ? CertificateAlertSeverity.Critical : CertificateAlertSeverity.Warning,
+            "Revocation",
+            $"Certificate {fingerprint} (serial {serial}) for service {serviceId} was revoked for {reason} by {requestedBy}.",
+            occurredAt,
+            CertificateAlertDeliveryState.Pending,
+            0,
+            null,
+            null,
+            null,
+            $"revoked:{serial}");
+    }
+
+    public static CertificateAlert ForRevocationFailed(Guid serviceId, Guid jobId, string serial, string error, DateTimeOffset occurredAt)
+    {
+        return new CertificateAlert(
+            Guid.NewGuid(),
+            jobId,
+            serviceId,
+            CertificateAlertKind.RevocationFailed,
+            CertificateAlertSeverity.Critical,
+            "Revocation",
+            $"Revocation of certificate serial {serial} for service {serviceId} did not reach the CA: {error}",
+            occurredAt,
+            CertificateAlertDeliveryState.Pending,
+            0,
+            null,
+            null,
+            null);
     }
 }

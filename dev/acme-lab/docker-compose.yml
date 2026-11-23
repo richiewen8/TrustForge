@@ -29,6 +29,10 @@ services:
       CertificateJobs__Alerts__WebhookUrl: http://target:8444/alerts
       CertificateJobs__Alerts__PollInterval: 00:00:02
       CertificateJobs__Deployment__RetainedReleases: "2"
+      CertificateJobs__Revocation__Enabled: "true"
+      CertificateJobs__Revocation__PollInterval: 00:00:02
+      CertificateJobs__Revocation__VisibilityTimeout: 00:00:30
+      CertificateJobs__Revocation__MaxAttempts: "5"
       CertificateJobs__Renewal__ScanInterval: 00:00:05
       CertificateJobs__Renewal__MinimumRenewalInterval: 00:02:00
       CertificateJobs__Expiry__ScanInterval: 00:00:05
