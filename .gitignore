@@ -16,6 +16,10 @@ dev/acceptance/secrets/
 dev/acceptance/out/
 # Generated from the operator's own preflight run, so it describes their environment, not the repo.
 dev/acceptance/FILL_CHECKLIST.md
+# Bare-metal installer: generated runtime configuration, staged builds and operator secrets.
+deploy/bare-metal/*.env
+deploy/bare-metal/secrets/
+deploy/bare-metal/dist/
 
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs

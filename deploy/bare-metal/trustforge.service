@@ -1,0 +1,78 @@
+[Unit]
+Description=TrustForge certificate platform (API with embedded DNS engine)
+Documentation=file:/opt/trustforge/BAREMETAL.md
+Documentation=https://github.com/TrustForge/TrustForge/blob/master/DEPLOYMENT.md
+After=network-online.target postgresql@17-main.service
+Wants=network-online.target
+# postgresql@17-main.service is ordered above but not Wanted: with --skip-postgres the database is
+# a remote cluster and a dependency on a unit that does not exist here would be wrong.
+
+# ExecStartPre migration plus Restart=always means a database outage looks like a crash loop.
+# These bounds turn it into a stopped unit that an operator notices.
+StartLimitIntervalSec=600
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=trustforge
+Group=trustforge
+
+# Migrations run in ExecStartPre below, so a schema upgrade on a large database can exceed the 90s
+# default and be killed mid-migration. This key belongs to [Service]; systemd ignores it in [Unit].
+TimeoutStartSec=900
+
+# The version directory is a symlink flipped by install.sh/upgrade; the assembly directory is
+# where the DNS engine resolves its www and dohwww content (DnsWebService.cs:165).
+WorkingDirectory=/opt/trustforge/app/current
+EnvironmentFile=/etc/trustforge/trustforge.env
+Environment=DOTNET_ROOT=/opt/dotnet
+# Parity with DnsServerApp/systemd.service: Technitium's TLS paths still accept SHA1-signed
+# upstream certificates.
+Environment=OPENSSL_ENABLE_SHA1_SIGNATURES=1
+
+# Single migration site: Program.cs:37 exits after applying EF Core migrations without starting
+# Kestrel or any hosted service. Concurrent --migrate runs are not safe (see
+# HSM-KMS-HA-EVALUATION.md), so nothing else may invoke it while the service is managed here.
+ExecStartPre=/opt/dotnet/dotnet /opt/trustforge/app/current/TrustForge.dll --migrate
+ExecStart=/opt/dotnet/dotnet /opt/trustforge/app/current/TrustForge.dll
+
+Restart=always
+RestartSec=10
+
+# Port 53 for the embedded DNS engine, below the privileged-port barrier, without root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+# ProtectSystem=strict makes the whole filesystem read-only except these. /var/lib/trustforge is
+# the certificate artifact store, created lazily (Program.cs:42-47); under Docker it was a named
+# volume. /etc/trustforge/secrets is deliberately NOT listed: it must stay read-only, since the
+# platform writes private keys to its targets and never to its own secret store.
+ReadWritePaths=/etc/trustforge/dns /var/lib/trustforge /var/log/technitium/dns
+
+UMask=0077
+LockPersonality=true
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+RemoveIPC=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# Docker's daemon default nofile limit is far above systemd's 1024 soft limit, and this process is
+# both a DNS server and an HTTPS API; not setting it would be a silent regression against the
+# container path.
+LimitNOFILE=524288
+
+[Install]
+WantedBy=multi-user.target

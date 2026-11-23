@@ -5,6 +5,10 @@
 *.sh text eol=lf
 supervisor.conf text eol=lf
 systemd.service text eol=lf
+# systemd unit files and EnvironmentFile sources are consumed on Linux; a checkout-side CRLF
+# makes systemd reject the unit and appends "\r" to every environment value.
+*.service text eol=lf
+*.env* text eol=lf
 # Using the HEREDOC feature expects LF:
 Dockerfile      text eol=lf
 ###############################################################################

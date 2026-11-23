@@ -1,5 +1,10 @@
 # TrustForge Linux deployment
 
+Two supported shapes, same application and same schema:
+
+- **This document — Docker Compose:** one application container plus a PostgreSQL container, the path every drill in `dev/acme-lab/` and `dev/acceptance/` has been validated against.
+- **[BAREMETAL.md](BAREMETAL.md) — systemd on Ubuntu 24.04:** `deploy/bare-metal/install.sh` puts the same process behind a hardened unit with PostgreSQL 17 from PGDG, for hosts that cannot or should not run a container runtime. Read it before adopting any path, directory or secret location from this document on a bare-metal host: several of them are container-specific (`/run/trustforge/secrets`, named volumes, the `127.0.0.1:` port mappings) and their equivalents are not one-to-one.
+
 TrustForge is deployed as one application container. The DNS engine runs inside the TrustForge process; it is not a separate Technitium container. PostgreSQL runs as the application's persistence dependency in the same Compose stack. Configure an external HTTPS OIDC issuer for API authentication.
 
 ## Requirements
@@ -33,7 +38,7 @@ The DNS administration UI retains its own Technitium authentication settings. Tr
 The certificate worker is disabled by default. To run the real issuance/deployment pipeline, set `TRUSTFORGE_WORKER_ENABLED=true` and configure:
 
 - `TRUSTFORGE_ACME_DIRECTORY_URL`: the step-ca ACME directory, e.g. `https://ca.internal.example/acme/trustforge/directory`. The URL must be HTTPS and its certificate must validate against the configured root.
-- `TRUSTFORGE_ACME_ROOT_CERT_PATH`: path (inside the container) to the step-ca root certificate PEM. Required: issued certificates are validated against this root before deployment. Mount it read-only from your secret/certificate distribution channel.
+- `TRUSTFORGE_ACME_ROOT_CERT_PATH`: path (inside the container; on a bare-metal host, a path the `trustforge` service user can read under `/etc/trustforge/secrets`) to the step-ca root certificate PEM. Required: issued certificates are validated against this root before deployment. Mount it read-only from your secret/certificate distribution channel.
 - `TRUSTFORGE_ACME_ACCOUNT_EMAIL` and `TRUSTFORGE_ACME_ACCOUNT_KEY_REF`: the ACME account contact and a secret reference (`secret://env/NAME`, or `secret://file/` followed by an absolute path, e.g. `secret://file//run/trustforge/secrets/acme-account.pem` — note the double slash) to the account private key PEM. Generate a dedicated EC P-256 key in PKCS#8 PEM (`BEGIN PRIVATE KEY`, e.g. `openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256`); never reuse a target service key. If your provisioner requires External Account Binding, set `TRUSTFORGE_ACME_EAB_KEY_ID` and `TRUSTFORGE_ACME_EAB_KEY_REF` together.
 - `TRUSTFORGE_TECHNITIUM_API_URL` and `TRUSTFORGE_TECHNITIUM_API_TOKEN_REF`: the embedded DNS API (loopback HTTP is allowed) and a secret reference to a least-privilege API token. Create a dedicated DNS user with View/Modify/Delete permission on the challenge zones only — no global administration rights.
 - `TRUSTFORGE_DNS_CHALLENGE_ZONE_0`: the zone allowed for `_acme-challenge` records. Challenges outside the configured zones are rejected.
@@ -52,6 +57,14 @@ the Technitium API token, and one `{"username","privateKeyPem"}` JSON per manage
 goes in that service's `sshCredentialRef`). Read-only is deliberate — the API writes keys to targets
 and never to its own secret store. Volumes persist container recreation, so deleting the stack with
 `down -v` destroys them; see [OPERATIONS.md](OPERATIONS.md) section 3.
+
+On a **bare-metal host** the same references are ordinary host paths and `/run` is the wrong home for
+them: `/run` is tmpfs, so anything stored there is gone at the next reboot. `deploy/bare-metal/install.sh`
+therefore uses `/etc/trustforge/secrets`, `0750 root:trustforge` with `0640` files. Note the ownership
+difference: the files must be *readable by the service user* (`EnvironmentSecretResolver.cs` does a
+plain `File.ReadAllText` with no ownership checks), so the container's "root-owned and read-only"
+model becomes "group-readable, and read-only because the unit's `ProtectSystem=strict` does not list
+that directory in `ReadWritePaths`". See [BAREMETAL.md](BAREMETAL.md).
 
 Revocation is a separate durable worker: `TRUSTFORGE_REVOCATION_ENABLED` (default `true`),
 `TRUSTFORGE_REVOCATION_POLL_INTERVAL`, `TRUSTFORGE_REVOCATION_VISIBILITY_TIMEOUT` and

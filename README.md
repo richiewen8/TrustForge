@@ -1,6 +1,6 @@
 # TrustForge
 
-TrustForge combines internal PKI and certificate lifecycle management with the Technitium DNS Server engine in one Linux application and one deployment image. The DNS engine is embedded in the TrustForge process; PostgreSQL is its persistent data service, and an external OIDC provider supplies API identity.
+TrustForge combines internal PKI and certificate lifecycle management with the Technitium DNS Server engine in one Linux application. The DNS engine is embedded in the TrustForge process; PostgreSQL is its persistent data service, and an external OIDC provider supplies API identity.
 
 ## Open and build
 
@@ -14,7 +14,7 @@ The solution includes the TrustForge API, domain and persistence modules, DNS co
 
 ## Deploy on Linux
 
-See [`DEPLOYMENT.md`](DEPLOYMENT.md) for Docker Compose setup, PostgreSQL, OIDC settings, persistent volumes, and endpoints. The root `docker-compose.yml` starts one TrustForge application container plus PostgreSQL. It does not deploy a separate Technitium DNS Server container.
+Two supported deployment shapes: [`DEPLOYMENT.md`](DEPLOYMENT.md) for Docker Compose — one TrustForge application container plus PostgreSQL, which is what the lab and acceptance drills validate — or [`BAREMETAL.md`](BAREMETAL.md) for a systemd service on a physical Ubuntu 24.04 host with no container runtime, installed by `deploy/bare-metal/install.sh`. Both embed the DNS engine in the TrustForge process; neither deploys a separate Technitium DNS Server. They cover the same endpoints, and their persistent-state locations differ.
 
 ## Current capabilities
 

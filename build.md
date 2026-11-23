@@ -27,3 +27,7 @@ docker compose up -d --build
 ```
 
 The root Dockerfile builds the required TechnitiumLibrary components and publishes the TrustForge API host with the embedded DNS engine into a single TrustForge image. PostgreSQL runs as a companion service in the same Compose stack. See `DEPLOYMENT.md` for ports, OIDC setup, and persistent data.
+
+## Linux bare-metal build
+
+The same three TechnitiumLibrary projects and the same `dotnet publish TrustForge/TrustForge.Api` command run directly on an Ubuntu 24.04 host: `deploy/bare-metal/install.sh` does it there, keeping the .NET SDK inside a throwaway directory that it deletes afterwards. See [`BAREMETAL.md`](BAREMETAL.md).

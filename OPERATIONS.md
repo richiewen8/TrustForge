@@ -5,10 +5,13 @@ how to back it up and restore it, how to rotate keys, how to upgrade the schema,
 monitor the system. The backup/restore procedure here is rehearsed end to end by the
 disposable lab drills `dev/acme-lab/drill-backup.sh` and `dev/acme-lab/drill-restore.sh`.
 
-TrustForge is a single application container (API + embedded Technitium DNS + certificate
-worker) with PostgreSQL as its persistence dependency and an external Smallstep `step-ca`
-as the ACME issuer. See [DEPLOYMENT.md](DEPLOYMENT.md) for first-time setup and
-[CERTIFICATE-PIPELINE.md](CERTIFICATE-PIPELINE.md) for the durable stage protocol.
+TrustForge is one application process (API + embedded Technitium DNS + certificate worker)
+with PostgreSQL as its persistence dependency and an external Smallstep `step-ca` as the ACME
+issuer. It runs either as a container pair under Compose ([DEPLOYMENT.md](DEPLOYMENT.md)) or as
+a systemd service on a physical host ([BAREMETAL.md](BAREMETAL.md)); the schema, the pipeline and
+most of this manual are identical. Where a procedure differs, both forms are shown, marked
+**Compose** and **bare metal**. See [CERTIFICATE-PIPELINE.md](CERTIFICATE-PIPELINE.md) for the
+durable stage protocol.
 
 ## 1. Where state lives
 
@@ -21,12 +24,30 @@ as the ACME issuer. See [DEPLOYMENT.md](DEPLOYMENT.md) for first-time setup and
 | Target service/action registrations, releases, **per-job private keys**, served `current` symlink | each Linux target's filesystem (`/etc/trustforge`, `/var/lib/trustforge`, `/etc/trustforge-demo`) | **Yes — target private keys** | target filesystem tar |
 | ACME account key, DNS API token, SSH deployer credential, CA root PEM | secret store referenced by `secret://…` (lab: `dev/acme-lab/secrets/`) | **Yes** | secret-store backup |
 
+On a bare-metal host the same state lives on directories instead of volumes
+(`deploy/bare-metal/install.sh` fixes these paths; the first three are in the unit's
+`ReadWritePaths`):
+
+| State | Bare-metal location |
+| --- | --- |
+| Jobs, services, versions, alerts | the PGDG cluster `postgresql@17-main` (`/var/lib/postgresql/17/main`) |
+| Issued public certificate bundles | `/var/lib/trustforge/artifacts` |
+| DNS zone files, users, API tokens | `/etc/trustforge/dns` (**frozen at first boot**, see BAREMETAL.md) |
+| ACME account key, DNS API token, SSH deployer credentials, CA root PEM | `/etc/trustforge/secrets` (`0750 root:trustforge`, files `0640`, read-only to the service) |
+| Runtime configuration | `/etc/trustforge/trustforge.env` (`0600`, root) |
+
+`/run/trustforge/secrets` is the **container** path only. On a host it is tmpfs and would vanish at
+reboot, so secret references authored for a bare-metal install must name `/etc/trustforge/secrets` —
+and because those references are stored in the database (`sshCredentialRef`), that choice is one-way.
+
 Two invariants shape every procedure below:
 
 - **Private keys never enter PostgreSQL, logs or checkpoints.** They are generated on the
   target and stay there; the CA keys stay in the step-ca volume. A PostgreSQL dump alone is
   therefore *not* a full backup — you must also capture the CA volume and the targets.
-- **The database stores only secret references** (`secret://env/NAME`, `secret://file/<abs>`).
+- **The database stores only secret references** (`secret://env/NAME`,
+  `secret://file//<abs>` — the double slash is required so the remainder parses as an absolute
+  path; see `TrustForge.Api/EnvironmentSecretResolver.cs`).
   Restoring the database does not restore the secrets themselves; the secret store must be
   restored independently and reachable at the same references.
 
@@ -47,13 +68,24 @@ move step-ca to a SQL backend (see [HSM-KMS-HA-EVALUATION.md](HSM-KMS-HA-EVALUAT
 
 ### 2.2 Backing up the CA
 
-Stop step-ca first so the badger DB is consistent, then archive its data volume:
+Stop step-ca first so the badger DB is consistent, then archive its data:
+
+**Compose:**
 
 ```sh
 docker compose stop step-ca
 docker run --rm -v <project>_stepca-data:/data:ro --entrypoint sh <helper-image> \
     -c 'tar -czf - -C /data .' > stepca.tar.gz
 docker compose up -d step-ca
+```
+
+**Bare metal** (step-ca installed as a host service, the usual shape next to a
+`deploy/bare-metal` TrustForge): stop the unit and tar its directory, no helper container needed:
+
+```sh
+systemctl stop step-ca
+tar -czf - -C /home/step . > stepca.tar.gz
+systemctl start step-ca
 ```
 
 `stepca.tar.gz` contains the root and intermediate **private keys** — store it encrypted,
@@ -74,8 +106,18 @@ docker run --rm -i -v <project>_stepca-data:/data --entrypoint sh <helper-image>
 docker compose up -d step-ca           # sees existing state, does NOT re-initialize
 ```
 
+**Bare metal:** the same ordering applies — the directory must be non-empty before step-ca first
+starts, or its own init will mint a different CA:
+
+```sh
+systemctl stop step-ca
+install -d -o step -g step /home/step && tar -xzf stepca.tar.gz -C /home/step
+systemctl start step-ca
+```
+
 After restore, the CA root PEM distributed to TrustForge (`SmallstepAcme:RootCertificatePath`)
-and to every target must be the **restored** root, not a freshly generated one.
+and to every target must be the **restored** root, not a freshly generated one. On a bare-metal
+host that file lives under `/etc/trustforge/secrets` and `RootCertificatePath` must name it there.
 
 ### 2.4 Root / intermediate rotation vs ACME account-key rotation
 
@@ -181,19 +223,42 @@ the ACME directory — no other authorization is accepted by step-ca.
 
 Take a logical dump on a schedule (e.g. nightly) plus before every schema upgrade:
 
+**Compose:**
+
 ```sh
 docker compose exec -T postgres pg_dump -U trustforge -d trustforge -Fc > trustforge.dump
 ```
+
+**Bare metal** (the cluster is local, so run `pg_dump` as the `postgres` OS user; there is no
+container to exec into):
+
+```sh
+sudo -u postgres pg_dump -U trustforge -d trustforge -Fc > trustforge.dump
+```
+
+A `trustforge-pg_dump.service` + `.timer` pair in `/etc/systemd/system/` replaces the "nightly"
+schedule there; copy the dump off-host, because unlike a Compose volume it is just a directory on
+the machine that is being backed up.
 
 `-Fc` (custom format) is compressed and supports selective, parallel restore. For
 point-in-time recovery (PITR) beyond logical dumps, enable WAL archiving
 (`archive_mode=on`, `archive_command`) and take periodic base backups (`pg_basebackup`);
 restore by replaying WAL to the target time. Logical dumps are sufficient for the lab and
-for recovering to the dump instant; PITR is recommended for production RPO < 24h.
+for recovering to the dump instant; PITR is recommended for production RPO < 24h. On bare metal
+PITR matters more than the container path implies: PostgreSQL is a peer unit on the same host
+rather than a sidecar, so host loss takes the database with the application.
 
-A **complete** application backup is the dump **plus** the CA volume, artifacts volume,
-dns-config volume, every target filesystem, and the secret store (section 1). The lab
-`drill-backup.sh` captures all of these and writes a `manifest.json` with row counts and the
+A **complete** application backup is the dump **plus** the CA data, the issued-bundle store, the
+DNS config, every target filesystem, and the secret store (section 1). Under Compose those are the
+`trustforge-certificate-artifacts` and `trustforge-dns-config` volumes; on a bare-metal host they are
+`/var/lib/trustforge/artifacts`, `/etc/trustforge/dns` and `/etc/trustforge/secrets`:
+
+```sh
+tar -czf dns-config.tgz    -C /etc/trustforge dns
+tar -czf artifacts.tgz     -C /var/lib/trustforge artifacts
+tar -czf secrets.tgz       -C /etc/trustforge secrets      # private: encrypt before shipping
+```
+The lab `drill-backup.sh` captures all of these and writes a `manifest.json` with row counts and the
 dump SHA-256.
 
 ### 3.2 Restore runbook
@@ -203,21 +268,36 @@ Order matters. The full lab procedure is `drill-restore.sh`; the production equi
 1. Stop the application workers (no new writes).
 2. Restore the secret store so every `secret://…` reference resolves again.
 3. Restore PostgreSQL into an empty database **before** starting TrustForge:
+
+   **Compose:**
    ```sh
    docker compose up -d postgres        # wait until healthy
    docker compose exec -T postgres pg_restore -U trustforge -d trustforge \
        --no-owner --no-privileges --exit-on-error < trustforge.dump
    ```
+   **Bare metal:** create an empty database first (the dump owns its tables, so drop or rename the
+   live one rather than restoring on top of it), then restore as that role:
+   ```sh
+   sudo systemctl stop trustforge
+   sudo -u postgres dropdb --if-exists trustforge
+   sudo -u postgres createdb -O trustforge trustforge
+   sudo -u postgres pg_restore -U trustforge -d trustforge \
+       --no-owner --no-privileges --exit-on-error < trustforge.dump
+   ```
    `--no-owner --no-privileges` avoids role mismatches; `--exit-on-error` fails loudly.
 4. Restore the CA volume **before** step-ca first starts (section 2.3).
-5. Restore the artifacts and dns-config volumes before starting TrustForge.
+5. Restore the artifacts and dns-config volumes before starting TrustForge. On a bare-metal host
+   these are directories: restore `/var/lib/trustforge/artifacts` and, if the DNS zones were lost,
+   `/etc/trustforge/dns` — then confirm the owner is still `trustforge:trustforge` with mode 0750,
+   since `ProtectSystem=strict` gives the service no other writable path to fall back on.
 6. Restore each target filesystem (registrations, releases, keys, `current` symlink), then
    restart the target services. **Never rebuild the target image to restore it** — in the
    lab the SSH host keys are baked into the image and rebuilding changes the pinned
    fingerprint.
 7. Start TrustForge. Its entrypoint runs `dotnet TrustForge.dll --migrate`; because the dump
    already contains `__EFMigrationsHistory`, this is a no-op when the dump matches the
-   image's migrations. Then start the OIDC issuer dependency.
+   image's migrations. On a bare-metal host the same migration is the unit's `ExecStartPre`.
+   Then start the OIDC issuer dependency.
 8. Verify: row counts match the backup manifest, `/health/ready` returns ready, and a fresh
    issuance job for a known service reaches `Succeeded` (this proves the restored CA keys,
    DNS, SSH target and pipeline all work together). The lab asserts exactly this.
@@ -230,11 +310,29 @@ runtime.
 1. Back up PostgreSQL (3.1) and the CA volume (2.2).
 2. Build the new image. On start it runs `--migrate`, applying any pending migrations
    forward-only. Migrations are additive and idempotent; the readiness endpoint returns 503
-   while migrations are pending.
+   while migrations are pending. On a bare-metal host, re-run
+   `sudo ./deploy/bare-metal/install.sh --yes --skip-postgres` with the new checkout: it stages a
+   new release under `/opt/trustforge/app/`, flips the `current` symlink atomically, and the unit's
+   `ExecStartPre` applies the pending migrations on the next start. `--skip-postgres` is what keeps
+   it from touching your cluster or re-issuing `CREATE ROLE`, and the recorded password in
+   `/etc/trustforge/secrets/database-password` is reused rather than regenerated.
 3. To apply migrations explicitly without starting the API:
    ```sh
    dotnet run --project TrustForge.Api -- --migrate
    ```
+   On an installed host, let systemd supply the environment rather than parsing
+   `/etc/trustforge/trustforge.env` in a shell — the file is EnvironmentFile syntax, and the
+   connection string contains `;`, which bash would treat as a command separator:
+   ```sh
+   sudo systemctl stop trustforge
+   sudo systemd-run --wait --collect --unit=trustforge-migrate \
+       -p EnvironmentFile=/etc/trustforge/trustforge.env \
+       -p User=trustforge -p Group=trustforge \
+       /opt/dotnet/dotnet /opt/trustforge/app/current/TrustForge.dll --migrate
+   ```
+   `--migrate` exits before Kestrel or any DNS listener starts (`TrustForge.Api/Program.cs:74-80`)
+   and needs only `ConnectionStrings:TrustForge`, not the OIDC settings. The unit's `ExecStartPre` is
+   the normal single migration site; two concurrent `--migrate` runs are not safe.
 4. Verify `/health/ready` and run a smoke issuance job.
 
 **Authoring convention** (for developers): migrations live in
@@ -263,7 +361,8 @@ with PostgreSQL `23505` and rolled back per migration, leaving the schema at the
 
 | Credential | Where referenced | Rotation |
 | --- | --- | --- |
-| PostgreSQL password | `ConnectionStrings:TrustForge`, Compose `POSTGRES_PASSWORD` | Change the role password and the connection secret together; restart the app. No schema impact. |
+| PostgreSQL password | `ConnectionStrings:TrustForge`, Compose `POSTGRES_PASSWORD`, or `/etc/trustforge/trustforge.env` on a bare-metal host | Change the role password and the connection secret together; restart the app. No schema impact. **Compose:** `ALTER ROLE` then recreate with the new `.env`. **Bare metal:** `sudo -u postgres psql -c "ALTER ROLE trustforge PASSWORD '...'"`, update the same value in `/etc/trustforge/trustforge.env` **and** `/etc/trustforge/secrets/database-password` (the installer reuses the latter), then `systemctl restart trustforge`. |
+| DNS console administrator | embedded Technitium `auth.config` in the dns-config volume / `/etc/trustforge/dns` | Rotate **inside the DNS console** (or its API). `DNS_SERVER_ADMIN_PASSWORD_FILE` is read only while `auth.config` does not exist, so editing it later changes nothing — see BAREMETAL.md. |
 | SSH deployer key | per-service `sshCredentialRef` → secret JSON `{username, privateKeyPem}` | Generate a new key pair, append the new public key to each target's `authorized_keys`, update the secret, verify with `POST /services/{id}/connection-test`, then remove the old public key. The pinned **host** key is separate and unchanged. |
 | SSH host key (target) | per-service `hostKeyFingerprint` | If a target host key changes, update the service's pinned fingerprint out-of-band; a mismatch aborts every remote operation before it runs. |
 | DNS API token | `TechnitiumDns:ApiTokenSecretRef` | Create a new least-privilege token for the challenge-zone user, update the secret, restart the worker, revoke the old token. |
@@ -272,7 +371,7 @@ with PostgreSQL `23505` and rolled back per migration, leaving the schema at the
 
 Secret values are resolved at runtime through `ISecretResolver` and are never persisted or
 logged. The shipped `EnvironmentSecretResolver` resolves `secret://env/NAME` and
-`secret://file/<abs>`; production should plug a vault/KMS-backed resolver (see
+`secret://file//<abs>`; production should plug a vault/KMS-backed resolver (see
 [HSM-KMS-HA-EVALUATION.md](HSM-KMS-HA-EVALUATION.md)).
 
 ## 5. Disaster recovery
@@ -281,11 +380,11 @@ logged. The shipped `EnvironmentSecretResolver` resolves `secret://env/NAME` and
 
 | Loss | Impact | Recovery |
 | --- | --- | --- |
-| TrustForge container/host | API + DNS + worker down; in-flight jobs stall | Restart/recreate the container. Jobs resume from persisted state after lease expiry (fencing tokens prevent double writes). DNS config survives in its volume. |
-| PostgreSQL data | All job/service/version/alert history lost | Restore the dump (3.2). Active jobs re-claim from restored state. |
+| TrustForge container/host | API + DNS + worker down; in-flight jobs stall | Restart/recreate the container, or `systemctl restart trustforge` on a bare-metal host (`journalctl -u trustforge` for the reason). Jobs resume from persisted state after lease expiry (fencing tokens prevent double writes). DNS config survives in its volume, or in `/etc/trustforge/dns` on a host. |
+| PostgreSQL data | All job/service/version/alert history lost | Restore the dump (3.2). Active jobs re-claim from restored state. On bare metal the cluster is a unit on the same host, so this is lost *with* the host unless dumps or WAL archiving go off-box. |
 | step-ca volume | CA keys lost; cannot issue or validate against the old root | Restore the CA volume before first start (2.3). If no backup exists, stand up a new CA, distribute the new root, and re-issue every service. |
-| artifacts volume | Issued public bundles lost | Restore the volume, or re-issue (bundles are reproducible from the CA). Deployment history references remain in PostgreSQL. |
-| dns-config volume | Zone + token lost | Restore the volume, or recreate the zone/token and update the DNS secret. |
+| artifacts volume | Issued public bundles lost | Restore the volume (`/var/lib/trustforge/artifacts` on a host), or re-issue (bundles are reproducible from the CA). Deployment history references remain in PostgreSQL. |
+| dns-config volume | Zone + token lost | Restore the volume (`/etc/trustforge/dns` on a host), or recreate the zone/token and update the DNS secret. On a host, recreating the directory from empty also re-applies the `DNS_SERVER_*` seed — see BAREMETAL.md before doing that. |
 | A target filesystem | That target's keys/registrations/served cert lost | Restore the target tar; if unrecoverable, re-register the service and run a fresh job (generates a new target key pair). |
 | Secret store | References resolve to nothing | Restore the secret store; the database alone is insufficient. |
 
@@ -431,6 +530,13 @@ release that currently owns `/etc/trustforge-demo/current` and the measured gaps
 renewals — rather than assuming the last recorded job still owns it.
 `verify.sh` includes expiry-reminder, audit-export and (when those drills
 ran) backup/restore, notification and migration-upgrade sections.
+
+These drills are container-shaped: they shell into `postgres` and `target` services with
+`docker compose exec`. Against a bare-metal TrustForge they still work, because they reach the API,
+the CA and the targets over the network — set `TF_API_URL=http://127.0.0.1:5000` and skip only the
+steps that exec into the lab's own containers. The bare-metal equivalent of the backup/restore and
+migration drills is the checklist at the end of [BAREMETAL.md](BAREMETAL.md), which is run by hand on
+the host rather than asserted by a script.
 
 ### 7.1 Real CA and real target acceptance (`dev/acceptance/`)
 
