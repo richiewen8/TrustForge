@@ -57,6 +57,15 @@ Three version facts are asserted before any asset is published:
 is the pin; it lives in the workflow `env`, in `MANIFEST.json` of every package, and in
 `/var/lib/trustforge/install.json` on an installed host.
 
+`MANIFEST.json`'s `baseImageDigest` is the digest the tag `mcr.microsoft.com/dotnet/sdk:10.0` resolved
+to for that build — a rolling tag over a multi-platform manifest list, so the digest is what names the
+bytes rather than the tag. The packager cannot resolve one itself (the base lands in BuildKit's cache,
+not in the docker image store), so it reads `BASE_IMAGE_DIGEST` from its environment and downgrades any
+value that is not `sha256:` plus 64 hex digits to `unknown`. The workflow asks the registry before and
+after `docker build`, and fails the run when the tag moved or the second lookup came back empty: a
+digest this build may not have used is worse than one that admits it is unknown. When the first lookup
+itself fails, the build continues and `MANIFEST.json` says `unknown`.
+
 To bump a release: change `<Version>` in `TrustForge.Api/TrustForge.Api.csproj`, land it on `master`,
 update `LIBRARY_PIN`/`LIBRARY_TAG` in the workflow if the library moved (and `DnsServerCore.csproj`'s
 `<Version>`, which the packager cross-checks), add `docs/release-notes/<new-tag>.md`, then tag

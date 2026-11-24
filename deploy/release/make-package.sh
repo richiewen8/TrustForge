@@ -39,7 +39,11 @@ REPO_ROOT_NAME=unknown
 SDK_VERSION=unknown
 BUILD_HOST=unknown
 BUILD_TIMESTAMP=unknown
-BASE_IMAGE_DIGEST=unknown
+# The one field above that the caller supplies rather than measures: docker build keeps the stage's base
+# in BuildKit's cache instead of the image store, so only the orchestrating pipeline can say which digest
+# it pulled. Left empty rather than defaulted, or an inherited value would be overwritten before the
+# provenance pass saw it; that pass turns anything unusable into unknown.
+BASE_IMAGE_DIGEST=${BASE_IMAGE_DIGEST-}
 EPOCH=0
 TAR_FLAGS=()
 
@@ -212,7 +216,10 @@ archive cannot be produced."
     BUILD_HOST=$(sed -n 's/^PRETTY_NAME="\(.*\)"/\1/p' /etc/os-release 2>/dev/null | head -1)
     [[ -n $BUILD_HOST ]] || BUILD_HOST=unknown
     BUILD_TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    # Shape-checked rather than trusted: MANIFEST.json is parsed by install.sh on a host that holds CA
+    # keys, and a malformed value there would outlive the build that produced it.
     BASE_IMAGE_DIGEST=${BASE_IMAGE_DIGEST:-unknown}
+    [[ $BASE_IMAGE_DIGEST =~ ^sha256:[0-9a-f]{64}$ ]] || BASE_IMAGE_DIGEST=unknown
     EPOCH=${SOURCE_DATE_EPOCH:-$(date +%s)}
     [[ $EPOCH =~ ^[0-9]+$ ]] || EPOCH=$(date +%s)
     log "library ${LIB_NAME}@${LIB_SHA} (ref ${LIB_REF}), engine ${ENGINE_VERSION}, sdk ${SDK_VERSION}"

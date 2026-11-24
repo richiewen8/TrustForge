@@ -112,7 +112,35 @@ jobs:
           # holding both checkouts. Without it, bin/obj/.git travel into the build and a stale
           # HintPath DLL can be compiled in.
           cp TrustForge/Dockerfile.dockerignore .dockerignore
+          # sdk:10.0 is a rolling tag over a multi-platform manifest list, so the only thing that names
+          # what this build actually consumed is the digest the tag resolved to at that moment. The
+          # registry is asked before and after the build for one reason: if the tag moved while the
+          # build ran, the recorded digest describes bytes this run may never have seen, and a
+          # provenance field that might be false is worth less than one that admits it is unknown.
+          base=mcr.microsoft.com/dotnet/sdk:10.0
+          base_digest() {
+              docker buildx imagetools inspect "$base" --format '{{json .Manifest.Digest}}' 2>/dev/null |
+                  tr -d '"'
+          }
+          before=$(base_digest) || before=
+          if [[ $before != sha256:* ]]; then
+              echo "::warning::$base had no resolvable digest; MANIFEST.json records unknown."
+              before=
+          fi
           docker build -f TrustForge/Dockerfile --target build -t trustforge-build:ci .
+          if [[ -n $before ]]; then
+              after=$(base_digest) || after=
+              if [[ $after != "$before" ]]; then
+                  # A tag that moved mid-build and a registry that stopped answering prove the same
+                  # thing: the digest on either side of the build is not known to describe these bytes.
+                  # Recording a maybe is worse than recording unknown, so the release stops here.
+                  echo "::error::$base was $before before the build and ${after:-unresolved} after;"
+                  echo "::error::these bytes cannot be attributed to one base digest, so nothing is published."
+                  exit 1
+              fi
+              echo "BASE_IMAGE_DIGEST=$before" >>"$GITHUB_ENV"
+              echo "base image $base resolved to $before"
+          fi
 
       - name: Extract the publish output
         run: |
@@ -162,6 +190,19 @@ jobs:
             { echo "::error::MANIFEST records TrustForge $manifest_sha, this checkout is $built"; exit 1; }
           grep -q '"publishMode": "framework-dependent"' "trustforge-$TF_VERSION-linux-manifest.json" ||
             { echo "::error::MANIFEST does not describe a framework-dependent release"; exit 1; }
+          # A provenance field is only worth having if the package carries the value this run measured
+          # rather than a plausible one. When nothing could be measured, the honest unknown has to
+          # survive the packager rather than be replaced by a guess.
+          recorded_base=$(awk -F'"' '/"baseImageDigest"/{print $4; exit}' "trustforge-$TF_VERSION-linux-manifest.json")
+          if [[ -n ${BASE_IMAGE_DIGEST:-} ]]; then
+            [[ $recorded_base == "$BASE_IMAGE_DIGEST" ]] ||
+              { echo "::error::MANIFEST records base $recorded_base, this run resolved $BASE_IMAGE_DIGEST"; exit 1; }
+            echo "manifest base image digest: $recorded_base"
+          else
+            [[ $recorded_base == unknown ]] ||
+              { echo "::error::MANIFEST records $recorded_base as the base digest although none resolved"; exit 1; }
+            echo "manifest base image digest: unknown (the registry did not answer)"
+          fi
 
       - name: Install the package into a scratch tree for inspection
         run: |

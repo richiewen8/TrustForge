@@ -22,11 +22,17 @@ REPO_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
 # pwd -W is the Git Bash builtin that prints D:/... instead of /d/...; docker.exe on Windows cannot
 # mount or read the POSIX form. On Linux the builtin does not exist and the plain pwd is correct.
 PARENT=$(cd -- "$REPO_ROOT/.." && { pwd -W 2>/dev/null || pwd; })
+# The -f argument needs the same treatment as the mount source: MSYS_NO_PATHCONV is exported below, so
+# a POSIX /d/... reaches docker.exe unconverted and the build fails on a path that looks like "\d:".
+REPO_WIN=$(cd -- "$REPO_ROOT" && { pwd -W 2>/dev/null || pwd; })
 
 IMAGE=tf-build:local
 LIBRARY_DIR=$PARENT/TechnitiumLibrary
 DIST=$REPO_ROOT/deploy/bare-metal/dist
 SKIP_BUILD=0
+# Resolved only when this script actually builds: the packager takes the base digest from its
+# environment, and a value from a build someone else ran would be a claim about bytes not measured here.
+base_digest=
 
 usage() {
     cat <<EOF
@@ -86,8 +92,16 @@ if [[ $SKIP_BUILD -eq 0 ]]; then
         created_ignore=1
     fi
     trap '[[ $created_ignore -eq 1 ]] && rm -f "$ignored" || true' EXIT
-    docker build -f "$REPO_ROOT/Dockerfile" --target build -t "$IMAGE" "$PARENT"
+    docker build -f "$REPO_WIN/Dockerfile" --target build -t "$IMAGE" "$PARENT"
     trap - EXIT
+    # BuildKit keeps the stage's base out of the image store, so the digest has to come from the registry
+    # rather than from anything the build left behind. Not being able to read it is not an error here:
+    # the packager records an empty value as unknown instead of guessing.
+    base_image=$(awk '/^FROM .* AS build/{print $2; exit}' "$REPO_ROOT/Dockerfile")
+    base_digest=$(docker buildx imagetools inspect "$base_image" --format '{{json .Manifest.Digest}}' \
+        2>/dev/null | tr -d '"') || base_digest=
+    [[ $base_digest == sha256:* ]] || base_digest=
+    printf '  base image %s = %s\n' "$base_image" "${base_digest:-unresolved}"
 fi
 
 step "extract the publish output the image runs"
@@ -156,6 +170,20 @@ if bash deploy/release/make-package.sh --app-dir "$dist/publish" --out "$dist" \
     say "assets written"
 else
     printf '  FAILED  the packager refused the tree it was handed\n'; fail=$((fail + 1))
+fi
+
+# The same assertion CI makes, so a passthrough that silently stopped working is caught locally too.
+if [ -n "${BASE_IMAGE_DIGEST:-}" ]; then
+    say "the manifest carries the base digest this build resolved"
+    recorded=$(awk -F'"' '/"baseImageDigest"/{print $4; exit}' \
+        "$dist/trustforge-$version-linux-manifest.json")
+    if [ "$recorded" = "$BASE_IMAGE_DIGEST" ]; then
+        say "MANIFEST.json: $recorded"
+    else
+        printf '  FAILED  MANIFEST records %s, this build resolved %s\n' \
+            "${recorded:-<absent>}" "$BASE_IMAGE_DIGEST"
+        fail=$((fail + 1))
+    fi
 fi
 
 say "install.sh --validate-package on the archive the packager just wrote"
@@ -237,7 +265,8 @@ printf '  container failures: %s\n' "$fail"
 CONTAINER
 
 docker run --rm -e TF_UIDGID="$uidgid" -e TF_VERSION="$version" -e TF_REPO="$(basename -- "$REPO_ROOT")" \
-    "${library_mount[@]}" -e TF_LIBRARY="$library_in" -v "$PARENT":/work \
+    "${library_mount[@]}" -e TF_LIBRARY="$library_in" -e BASE_IMAGE_DIGEST="$base_digest" \
+    -v "$PARENT":/work \
     --entrypoint bash ubuntu:24.04 "/work/$(basename -- "$REPO_ROOT")/deploy/bare-metal/dist/gate/gate.sh"
 
 # A green container run is not evidence that anything was checked; the assets are the evidence.
