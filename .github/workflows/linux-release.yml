@@ -47,12 +47,13 @@ jobs:
       # Both repositories are siblings of $GITHUB_WORKSPACE because that is the layout Dockerfile:1
       # expects and the layout DnsServerCore's HintPath (..\..\TechnitiumLibrary\bin\) resolves
       # against. actions/checkout cannot place a path outside GITHUB_WORKSPACE, so the sibling goes
-      # inside it.
-      - uses: actions/checkout@v4
+      # inside it. v4 of these actions runs on Node 20, which GitHub is retiring with a warning on
+      # every step; the majors below are the node24 generations.
+      - uses: actions/checkout@v7
         with:
           path: TrustForge
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: ${{ env.LIBRARY_REPO }}
           ref: ${{ env.LIBRARY_PIN }}
@@ -320,7 +321,7 @@ jobs:
             echo "::error::$notes contains CR characters; the release body would carry them"; exit 1
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-assets
           path: ${{ runner.temp }}/assets
@@ -337,7 +338,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Resolve the version
         run: |
@@ -348,7 +349,7 @@ jobs:
 
       # The bytes published are the bytes verify checked: they arrive as the artifact, never as a
       # second build that could differ from it.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: release-assets
           path: assets
