@@ -1,9 +1,18 @@
 # TrustForge on a physical Linux host (no Docker)
 
 `deploy/bare-metal/install.sh` installs TrustForge as a systemd service on **Ubuntu 24.04**, with
-PostgreSQL 17 from the PGDG apt repository, on a host with no container runtime. The build runs on
-the target, so the machine needs the sibling `TechnitiumLibrary` checkout and outbound HTTPS to
-`dot.net`, `api.nuget.org` and `apt.postgresql.org`.
+PostgreSQL 17 from the PGDG apt repository, on a host with no container runtime. It has two modes, and
+they install the same shape of application — framework-dependent, RID-less — from different places:
+
+| Mode | Input | What the host needs beyond systemd |
+| --- | --- | --- |
+| Release package | `--package-file trustforge-<version>-linux.tar.gz`, or running the `install.sh` that is inside an unpacked release | outbound HTTPS to `dot.net` and `apt.postgresql.org`. No compiler, no source tree, no library checkout. |
+| Build on target | this repository checked out, with `TechnitiumLibrary` beside it | additionally `api.nuget.org` and the .NET 10 SDK: the machine compiles the application itself. |
+
+Package mode is the documented way to install a release; see
+[Install from a release package](#install-from-a-release-package). Both modes still fetch the shared
+runtime from `dot.net`, because the publish is framework-dependent by decision
+(`build.md`).
 
 Choose this over [DEPLOYMENT.md](DEPLOYMENT.md) when the certificate platform must live on hardware
 that cannot run containers, or when you want the database and the service under the same host tooling
@@ -14,11 +23,14 @@ off the machine entirely.
 ## What the installer does
 
 ```sh
-sudo ./deploy/bare-metal/install.sh --check-only    # read-only preflight, changes nothing
-sudo ./deploy/bare-metal/install.sh --dry-run       # preflight, then print the plan
-sudo ./deploy/bare-metal/install.sh --oidc-authority https://id.internal/realms/trustforge \
+sudo bash deploy/bare-metal/install.sh --check-only    # read-only preflight, changes nothing
+sudo bash deploy/bare-metal/install.sh --dry-run       # preflight, then print the plan
+sudo bash deploy/bare-metal/install.sh --oidc-authority https://id.internal/realms/trustforge \
                                     --oidc-audience trustforge-api
 ```
+
+`bash` rather than `./` because a Windows-authored checkout, a copied tree, or an unpacked tar can all
+lose the exec bit; the script declares its interpreter on line 1 either way.
 
 | Concern | Bare metal | Under Docker |
 | --- | --- | --- |
@@ -34,8 +46,63 @@ sudo ./deploy/bare-metal/install.sh --oidc-authority https://id.internal/realms/
 
 The installer refuses to run unless: the host is Ubuntu 24.04 on systemd and not containerised,
 port 53/tcp+udp and 5380/tcp and 5000/tcp are free, no Docker TrustForge stack exists on the host,
-the TechnitiumLibrary projects are present, and PostgreSQL 17 is installable. It prints
-`PASS/FAIL/NOTE` per check and changes nothing on a failure.
+PostgreSQL 17 is installable, and its build inputs are present — the source checkout with the
+TechnitiumLibrary projects in build mode, or a release package that passes its own validation in
+package mode. It prints `PASS/FAIL/NOTE` per check and changes nothing on a failure.
+
+## Install from a release package
+
+The assets on the Releases page come from `.github/workflows/linux-release.yml`: it runs the `build`
+stage of this repository's own `Dockerfile`, copies `/out/publish` out of it, and hands those bytes to
+`deploy/release/make-package.sh`. The package and the container image are therefore one build, not two
+builds that were compared afterwards. Nothing is compiled on your host in this mode.
+
+```sh
+sha256sum -c trustforge-0.1.0-linux.tar.gz.sha256      # verify before unpacking as root
+tar -xzf trustforge-0.1.0-linux.tar.gz
+cd trustforge-0.1.0-linux
+sudo bash deploy/bare-metal/install.sh --check-only
+sudo bash deploy/bare-metal/install.sh --oidc-authority https://id.internal/realms/trustforge \
+                                    --oidc-audience trustforge-api
+```
+
+Or leave the archive where it downloaded and point a checkout's installer at it:
+
+```sh
+sudo bash deploy/bare-metal/install.sh --package-file ~/downloads/trustforge-0.1.0-linux.tar.gz \
+    --oidc-authority https://id.internal/realms/trustforge --oidc-audience trustforge-api
+```
+
+`install.sh --validate-package ARCHIVE` runs the archive checks without root and without changing
+anything: one top-level directory, no absolute or `..` member names, no symlink/device/FIFO members,
+no setuid/setgid/sticky or group-/world-writable modes, no `*.env`, `*.pem`, `*.key`, `*.p12` or
+`secrets/` file, the exec bit intact on `install.sh`, `SHA256SUMS` verifying inside the tree, the three
+`__TF_` sentinels still present in the env template, and `MANIFEST.json` agreeing with the archive's own
+file name. Extraction goes to a `0700` scratch directory under `${TMPDIR:-/var/tmp}` with
+`--no-same-owner`, and is removed on exit. Run it on a download before you run the installer.
+
+**What package mode does not avoid.** It removes the .NET SDK, the source checkout and the sibling
+library from the target — and nothing else:
+
+| Still required | Why |
+| --- | --- |
+| Ubuntu 24.04, systemd, root, not a container | the unit file, the service account, and the guards that refuse everything else |
+| Outbound HTTPS to `dot.net` | the release is framework-dependent, so the ASP.NET Core 10 shared runtime is installed on the host |
+| Outbound HTTPS to `apt.postgresql.org` | PostgreSQL 17 comes from PGDG, unless `--skip-postgres` |
+| A reachable OIDC issuer | `Authentication__Authority` and `__Audience` are mandatory and are discovered during install |
+| The on-target checklist at the end of this file | CI validates the package; it cannot start a service on hardware it does not have |
+
+`--source-dir` and `--technitium-library` are hard errors in package mode rather than silently ignored,
+and a package unpacked on top of a source checkout is refused as ambiguous — both cases would leave it
+unclear which bytes are about to be installed.
+
+The release lands at `/opt/trustforge/app/<version>-<gitShaShort>-<timestamp>` — build-on-target installs
+use `<gitShaShort>-<timestamp>` — and `/var/lib/trustforge/install.json` records what happened:
+`installMode` is `package` or `built-on-target`, package installs add `packageFile` (base name only,
+never the operator's path), `packageVersion`, `packageGitSha` and `packageLibrarySha`, and every install
+records `libraryGitSha`. **No secret value is ever written there** — the database password exists only in
+`/etc/trustforge/secrets/database-password`, and that directory is `0750 root:trustforge` with `0640`
+files.
 
 ## Secret paths are a one-way decision
 
@@ -126,11 +193,16 @@ update check is on by default, `DnsServer.cs:477`).
 ```sh
 sudo -u postgres pg_dump -U trustforge -d trustforge -Fc -f /root/trustforge-pre-upgrade.dump
 sudo tar -czf /root/dns-config-pre-upgrade.tgz -C /etc/trustforge dns
-cd /path/to/new/TrustForge
-sudo ./deploy/bare-metal/install.sh --yes --skip-postgres --db-password-file /etc/trustforge/secrets/database-password \
+sudo bash /path/to/trustforge-0.2.0/deploy/bare-metal/install.sh --yes --skip-postgres \
+    --db-password-file /etc/trustforge/secrets/database-password \
     --oidc-authority "$(grep -oPm1 '(?<=^Authentication__Authority=).*' /etc/trustforge/trustforge.env)" \
     --oidc-audience "$(grep -oPm1 '(?<=^Authentication__Audience=).*' /etc/trustforge/trustforge.env)"
 ```
+
+From an archive rather than an unpacked directory, add `--package-file /path/trustforge-0.2.0-linux.tar.gz`
+to any of the forms above; the same checks run before anything is staged. From a source checkout, run
+that checkout's `deploy/bare-metal/install.sh` with no package option and with the sibling library present,
+which builds on the target as before.
 
 `--skip-postgres` keeps the existing cluster: the installer reuses the recorded password in
 `/etc/trustforge/secrets/database-password` and never re-issues `CREATE ROLE`. The new release lands
@@ -180,7 +252,21 @@ set `TF_API_URL=http://127.0.0.1:5000` and read their README for the rest.
 
 ## Checking these scripts without a target host
 
-There is no CI in this repository, so run these yourself. From the repository root:
+`.github/workflows/linux-release.yml` does this on every push to `master`, every pull request, and
+every `v*` tag: it builds the image's build stage, packages the five release assets, validates them,
+lints every shell script, parses the unit file, refuses hostile packages, and on a tag publishes the
+release after re-checksumming what it downloaded back. Run the same non-hardware checks on your own
+machine with `deploy/bare-metal/build-and-verify-in-container.sh`:
+
+```sh
+bash deploy/bare-metal/build-and-verify-in-container.sh                # build, then check
+bash deploy/bare-metal/build-and-verify-in-container.sh --skip-build   # reuse tf-build:local
+```
+
+It needs docker and a sibling `TechnitiumLibrary` checkout (the Dockerfile's build context is the
+parent directory), and it writes only into the git-ignored `deploy/bare-metal/dist/`.
+
+The two checks it wraps are worth knowing individually. From the repository root:
 
 ```sh
 docker run --rm -e DEBIAN_FRONTEND=noninteractive -v "$PWD":/work -w /work ubuntu:24.04 bash -c \

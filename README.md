@@ -14,7 +14,7 @@ The solution includes the TrustForge API, domain and persistence modules, DNS co
 
 ## Deploy on Linux
 
-Two supported deployment shapes: [`DEPLOYMENT.md`](DEPLOYMENT.md) for Docker Compose — one TrustForge application container plus PostgreSQL, which is what the lab and acceptance drills validate — or [`BAREMETAL.md`](BAREMETAL.md) for a systemd service on a physical Ubuntu 24.04 host with no container runtime, installed by `deploy/bare-metal/install.sh`. Both embed the DNS engine in the TrustForge process; neither deploys a separate Technitium DNS Server. They cover the same endpoints, and their persistent-state locations differ.
+Two supported deployment shapes: [`DEPLOYMENT.md`](DEPLOYMENT.md) for Docker Compose — one TrustForge application container plus PostgreSQL, which is what the lab and acceptance drills validate — or [`BAREMETAL.md`](BAREMETAL.md) for a systemd service on a physical Ubuntu 24.04 host with no container runtime, installed by `deploy/bare-metal/install.sh`. On Linux you can install a [Release](https://github.com/richiewen8/TrustForge/releases) package on a host with no source checkout and no .NET SDK; that same installer still builds from a checkout when you point it at one. Both embed the DNS engine in the TrustForge process; neither deploys a separate Technitium DNS Server. They cover the same endpoints, and their persistent-state locations differ.
 
 ## Current capabilities
 
@@ -28,4 +28,4 @@ Certificate issuance, durable worker execution, SSH certificate deployment, heal
 
 ## Upstream DNS engine
 
-TrustForge builds on the [Technitium DNS Server](https://github.com/TechnitiumSoftware/DnsServer) and its [TechnitiumLibrary](https://github.com/TechnitiumSoftware/TechnitiumLibrary). Their source remains in this repository and sibling checkout as build inputs. The DNS web console retains its separate authentication configuration for now; TrustForge API OIDC/RBAC does not yet provide a unified console login.
+TrustForge builds on the [Technitium DNS Server](https://github.com/TechnitiumSoftware/DnsServer) and its [TechnitiumLibrary](https://github.com/TechnitiumSoftware/TechnitiumLibrary). Their source remains build inputs rather than packages: this repository plus a sibling `TechnitiumLibrary` checkout, and releases pin that library by commit (`dns-server-v15.6.2` at `4a5a530a…`, recorded in `build.md`, in each package's `MANIFEST.json`, and in `/var/lib/trustforge/install.json` on an installed host). The DNS web console retains its separate authentication configuration for now; TrustForge API OIDC/RBAC does not yet provide a unified console login.

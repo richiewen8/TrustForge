@@ -3,7 +3,7 @@
 Two supported shapes, same application and same schema:
 
 - **This document — Docker Compose:** one application container plus a PostgreSQL container, the path every drill in `dev/acme-lab/` and `dev/acceptance/` has been validated against.
-- **[BAREMETAL.md](BAREMETAL.md) — systemd on Ubuntu 24.04:** `deploy/bare-metal/install.sh` puts the same process behind a hardened unit with PostgreSQL 17 from PGDG, for hosts that cannot or should not run a container runtime. Read it before adopting any path, directory or secret location from this document on a bare-metal host: several of them are container-specific (`/run/trustforge/secrets`, named volumes, the `127.0.0.1:` port mappings) and their equivalents are not one-to-one.
+- **[BAREMETAL.md](BAREMETAL.md) — systemd on Ubuntu 24.04:** `deploy/bare-metal/install.sh` puts the same process behind a hardened unit with PostgreSQL 17 from PGDG, for hosts that cannot or should not run a container runtime. It installs either a [Release](https://github.com/richiewen8/TrustForge/releases) package (no checkout, no .NET SDK on the host) or a source checkout (it builds there). Read it before adopting any path, directory or secret location from this document on a bare-metal host: several of them are container-specific (`/run/trustforge/secrets`, named volumes, the `127.0.0.1:` port mappings) and their equivalents are not one-to-one.
 
 TrustForge is deployed as one application container. The DNS engine runs inside the TrustForge process; it is not a separate Technitium container. PostgreSQL runs as the application's persistence dependency in the same Compose stack. Configure an external HTTPS OIDC issuer for API authentication.
 

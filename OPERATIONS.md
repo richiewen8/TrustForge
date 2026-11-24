@@ -311,7 +311,9 @@ runtime.
 2. Build the new image. On start it runs `--migrate`, applying any pending migrations
    forward-only. Migrations are additive and idempotent; the readiness endpoint returns 503
    while migrations are pending. On a bare-metal host, re-run
-   `sudo ./deploy/bare-metal/install.sh --yes --skip-postgres` with the new checkout: it stages a
+   `sudo bash deploy/bare-metal/install.sh --yes --skip-postgres` from the new checkout, or with
+   `--package-file trustforge-<version>-linux.tar.gz` (or from inside an unpacked release) to install a
+   published package with no checkout and no SDK on the host: it stages a
    new release under `/opt/trustforge/app/`, flips the `current` symlink atomically, and the unit's
    `ExecStartPre` applies the pending migrations on the next start. `--skip-postgres` is what keeps
    it from touching your cluster or re-issuing `CREATE ROLE`, and the recorded password in
