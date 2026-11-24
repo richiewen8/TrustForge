@@ -79,7 +79,9 @@ Options:
   --out DIR              Asset output directory. Default: deploy/bare-metal/dist (git-ignored).
   --tag NAME             Release tag being packaged. Must equal v<version>, which is also what stops
                          an inherited upstream v15.x tag from ever producing a TrustForge release.
-  --expect-library-ref R Abort unless the library checkout is exactly ref R. CI passes the pin here.
+  --expect-library-ref R Abort unless the library checkout is exactly R: its commit SHA, or its tag
+                         name. CI passes the pin here, and the SHA is the spelling that survives a
+                         checkout by SHA.
   --skip-source          Skip the corresponding-source archive. A distributed binary without it does
                          not satisfy GPLv3, so this is for a local dry assembly only.
   -h, --help             This text.
@@ -175,8 +177,12 @@ collect_provenance() {
         LIB_SHA=$(git -C "$LIB_DIR" rev-parse HEAD 2>/dev/null || printf 'unknown')
         LIB_REF=$(git -C "$LIB_DIR" describe --tags --exact-match 2>/dev/null || printf 'unknown')
     fi
-    if [[ -n $EXPECT_LIB_REF && $LIB_REF != "$EXPECT_LIB_REF" ]]; then
-        die "the library checkout is at ref '$LIB_REF' but $EXPECT_LIB_REF was required. Packaging
+    if [[ -n $EXPECT_LIB_REF && $LIB_SHA != "$EXPECT_LIB_REF" && $LIB_REF != "$EXPECT_LIB_REF" ]]; then
+        # Accepted as either the SHA or the tag name: CI checks the library out by SHA, where
+        # `describe --exact-match` only names the tag if the fetch happened to include it, so
+        # insisting on one spelling alone would make the pin fail for reasons that have nothing to
+        # do with the bytes being packaged.
+        die "the library checkout is '$LIB_SHA' ($LIB_REF) but $EXPECT_LIB_REF was required. Packaging
 against an unpinned library yields a binary that nobody can map back to source."
     fi
 
@@ -511,6 +517,19 @@ main() {
     STAGE_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/trustforge-package.XXXXXX")
     trap cleanup EXIT
     install -d -m 0755 "$OUT_DIR"
+    # An output directory holding anything else is a directory whose contents somebody will treat as
+    # release assets: the asset count that CI asserts, and the "5 files" a release page shows, both
+    # silently include whatever was already sitting there.
+    local stray=() f
+    for f in "$OUT_DIR"/*; do
+        [[ -f $f ]] || continue
+        [[ $(basename -- "$f") == "trustforge-$VERSION-"* ]] && continue
+        stray+=("$(basename -- "$f")")
+    done
+    if [[ ${#stray[@]} -gt 0 ]]; then
+        printf 'stray file in the output directory: %s\n' "${stray[@]}" >&2
+        die "--out $OUT_DIR must hold nothing but trustforge-$VERSION-* assets; point --out at a clean directory."
+    fi
     make_package_archive
     if [[ $SKIP_SOURCE -eq 0 ]]; then
         make_source_archive

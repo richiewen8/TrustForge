@@ -1,0 +1,345 @@
+# Builds the Linux release assets from the Dockerfile's own build stage, validates them, and on a
+# version tag publishes them as a GitHub Release.
+#
+# What this workflow can prove: the packaged application bytes are the bytes the image runs (they are
+# docker-cp'd out of the build stage, not rebuilt by a second toolchain); the installer accepts the
+# published archive and rejects hostile ones; every repository and packaged shell script parses and
+# passes shellcheck; the unit file is parseable by systemd; the recorded provenance matches the
+# library checkout this run actually used; and the bytes a user downloads are the bytes that were
+# checked.
+#
+# What it cannot prove, and does not claim: that TrustForge installed and ran on hardware. The
+# installer refuses containers, non-root and non-systemd hosts on purpose, so the runner can only
+# assert that refusal works. The on-target checklist in BAREMETAL.md stays the only installation
+# evidence.
+name: linux-release
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+    tags: ['v*']
+  # Verify only: publishing requires a real version tag so that the tag/version assertion has a
+  # subject. There is deliberately no tag input here to make it look like more than a rehearsal.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  DEBIAN_FRONTEND: noninteractive
+  # The library is pinned by commit SHA, never by tag name: tags are movable, and a release whose
+  # corresponding source can drift out from under it is not reproducible.
+  LIBRARY_REPO: TechnitiumSoftware/TechnitiumLibrary
+  LIBRARY_PIN: 4a5a530ac6c4114e72216e0b9c74208a7a5e3fa0
+  LIBRARY_TAG: dns-server-v15.6.2
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      # Both repositories are siblings of $GITHUB_WORKSPACE because that is the layout Dockerfile:1
+      # expects and the layout DnsServerCore's HintPath (..\..\TechnitiumLibrary\bin\) resolves
+      # against. actions/checkout cannot place a path outside GITHUB_WORKSPACE, so the sibling goes
+      # inside it.
+      - uses: actions/checkout@v4
+        with:
+          path: TrustForge
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.LIBRARY_REPO }}
+          ref: ${{ env.LIBRARY_PIN }}
+          path: TechnitiumLibrary
+          # Full history so that `git describe --tags --exact-match` names the tag: that is what lets
+          # make-package.sh compare the library's engine version with the vendored one and turn a
+          # silent vendored-drift into a red build.
+          fetch-depth: 0
+
+      - name: Assert the library checkout is the pinned commit
+        run: |
+          got=$(git -C TechnitiumLibrary rev-parse HEAD)
+          if [[ $got != "$LIBRARY_PIN" ]]; then
+            echo "::error::TechnitiumLibrary is at $got, not the pinned $LIBRARY_PIN"
+            exit 1
+          fi
+          describe=$(git -C TechnitiumLibrary describe --tags --exact-match 2>/dev/null || printf none)
+          if [[ $describe != "$LIBRARY_TAG" ]]; then
+            echo "::error::the pinned commit describes as '$describe', expected '$LIBRARY_TAG'. A"
+            echo "::error::release must record the engine version it was built against; if upstream"
+            echo "::error::retagged this commit, update both the pin and LIBRARY_TAG deliberately."
+            exit 1
+          fi
+          echo "library $got ($describe)"
+
+      - name: Resolve the version and tag
+        run: |
+          # TrustForge.Api.csproj <Version> is the only version source of truth in this repository.
+          version=$(awk -F'[<>]' '/<Version>/{print $3; exit}' TrustForge/TrustForge.Api/TrustForge.Api.csproj)
+          if [[ ! $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::TrustForge.Api.csproj declares no usable <Version> (got '$version')"
+            exit 1
+          fi
+          # On a tag push the tag is the thing being released and must equal v<Version>; that is also
+          # what stops an inherited upstream tag (dns-server-v15.x) from ever producing a TrustForge
+          # release. Anywhere else the packaging still runs, against the version it derives here.
+          if [[ $GITHUB_REF_TYPE == tag ]]; then
+            tag=$GITHUB_REF_NAME
+            if [[ $tag != "v$version" ]]; then
+              echo "::error::tag $tag does not equal v$version declared by TrustForge.Api.csproj"
+              exit 1
+            fi
+          else
+            tag="v$version"
+          fi
+          {
+            echo "TF_VERSION=$version"
+            echo "TF_TAG=$tag"
+            echo "TF_PKG=trustforge-$version-linux.tar.gz"
+            echo "TF_SOURCE_PKG=trustforge-$version-source.tar.gz"
+          } >>"$GITHUB_ENV"
+          echo "packaging $tag as trustforge-$version-linux.tar.gz"
+
+      - name: Build the application in the image's build stage
+        run: |
+          # The .dockerignore belongs at the context root, and the context root is the workspace
+          # holding both checkouts. Without it, bin/obj/.git travel into the build and a stale
+          # HintPath DLL can be compiled in.
+          cp TrustForge/Dockerfile.dockerignore .dockerignore
+          docker build -f TrustForge/Dockerfile --target build -t trustforge-build:ci .
+
+      - name: Extract the publish output
+        run: |
+          publish=$RUNNER_TEMP/publish
+          install -d -m 0755 "$publish"
+          cid=$(docker create trustforge-build:ci)
+          docker cp "$cid:/out/publish/." "$publish/"
+          docker rm "$cid" >/dev/null
+          # docker cp lands files as uid 0; the packager and the upload step run as the runner user.
+          sudo chown -R "$(id -u):$(id -g)" "$publish"
+          echo "TF_PUBLISH_DIR=$publish" >>"$GITHUB_ENV"
+          find "$publish" -maxdepth 1 -name 'TrustForge.dll' -printf 'extracted %p\n' | grep . ||
+            { echo "::error::no TrustForge.dll in the build stage output"; exit 1; }
+
+      - name: Assemble the release assets
+        run: |
+          cd TrustForge
+          bash deploy/release/make-package.sh \
+            --app-dir "$TF_PUBLISH_DIR" \
+            --out "$RUNNER_TEMP/assets" \
+            --tag "$TF_TAG" \
+            --expect-library-ref "$LIBRARY_PIN"
+          echo "TF_ASSETS=$RUNNER_TEMP/assets" >>"$GITHUB_ENV"
+
+      - name: Assert the asset set and its checksums
+        run: |
+          cd "$TF_ASSETS"
+          for a in "$TF_PKG" "$TF_PKG.sha256" "trustforge-$TF_VERSION-linux-manifest.json" \
+                   "$TF_SOURCE_PKG" "$TF_SOURCE_PKG.sha256"; do
+            [[ -f $a ]] || { echo "::error::missing release asset: $a"; exit 1; }
+          done
+          found=$(find . -maxdepth 1 -type f | wc -l)
+          if [[ $found -ne 5 ]]; then
+            echo "::error::expected 5 release assets, found $found"; ls -l; exit 1
+          fi
+          sha256sum -c "$TF_PKG.sha256" "$TF_SOURCE_PKG.sha256"
+          # Provenance is only worth having if it describes this run: the manifest must record the
+          # library commit that was actually checked out above, not whatever the builder had locally.
+          recorded=$(awk -F'"' '/"libraryGitSha"/{print $4; exit}' "trustforge-$TF_VERSION-linux-manifest.json")
+          [[ $recorded == "$LIBRARY_PIN" ]] ||
+            { echo "::error::MANIFEST records library $recorded, expected $LIBRARY_PIN"; exit 1; }
+          # And the application commit it names must be the commit this workflow was asked to release,
+          # so the published binary is attributable rather than merely plausible.
+          built=$(git -C "$GITHUB_WORKSPACE/TrustForge" rev-parse HEAD)
+          manifest_sha=$(awk -F'"' '/"gitSha"/{print $4; exit}' "trustforge-$TF_VERSION-linux-manifest.json")
+          [[ $manifest_sha == "$built" ]] ||
+            { echo "::error::MANIFEST records TrustForge $manifest_sha, this checkout is $built"; exit 1; }
+          grep -q '"publishMode": "framework-dependent"' "trustforge-$TF_VERSION-linux-manifest.json" ||
+            { echo "::error::MANIFEST does not describe a framework-dependent release"; exit 1; }
+
+      - name: Install the package into a scratch tree for inspection
+        run: |
+          unpacked=$RUNNER_TEMP/unpacked
+          install -d -m 0755 "$unpacked"
+          tar -xz --no-same-owner -f "$TF_ASSETS/$TF_PKG" -C "$unpacked"
+          echo "TF_UNPACKED=$unpacked/trustforge-$TF_VERSION-linux" >>"$GITHUB_ENV"
+
+      - name: Validate the published archive
+        run: bash TrustForge/deploy/bare-metal/install.sh --validate-package "$TF_ASSETS/$TF_PKG"
+
+      - name: Parse and lint every shell script, repo and packaged
+        run: |
+          sudo apt-get -qq update && sudo apt-get -qq -y install shellcheck
+          scripts=(
+            TrustForge/deploy/bare-metal/install.sh
+            TrustForge/deploy/bare-metal/build-and-verify-in-container.sh
+            TrustForge/deploy/release/make-package.sh
+            "$TF_UNPACKED/deploy/bare-metal/install.sh"
+          )
+          # What the operator reads in the repository is what the release makes them run.
+          diff -q TrustForge/deploy/bare-metal/install.sh "$TF_UNPACKED/deploy/bare-metal/install.sh" ||
+            { echo "::error::the packaged installer differs from the one in this commit"; exit 1; }
+          for s in "${scripts[@]}"; do
+            [[ -f $s ]] || { echo "::error::expected script is missing: $s"; exit 1; }
+            bash -n "$s"
+            shellcheck -S style "$s"
+          done
+          [[ -x "$TF_UNPACKED/deploy/bare-metal/install.sh" ]] ||
+            { echo "::error::the packaged installer lost its exec bit"; exit 1; }
+
+      - name: Verify the packaged unit file parses
+        run: |
+          # systemd-analyze verify resolves the paths the unit names, so stage the ones a real
+          # install creates or it reports "Command /opt/dotnet/dotnet is not executable" - an
+          # artefact of an empty runner, not a defect in the unit. BAREMETAL.md documents this.
+          sudo install -d -m 0755 /opt/dotnet /opt/trustforge/app/current /etc/trustforge
+          printf '#!/bin/sh\nexit 0\n' | sudo tee /opt/dotnet/dotnet >/dev/null
+          sudo chmod 0755 /opt/dotnet/dotnet
+          sudo touch /opt/trustforge/app/current/TrustForge.dll /etc/trustforge/trustforge.env
+          systemd-analyze verify "$TF_UNPACKED/deploy/bare-metal/trustforge.service"
+
+      - name: The installer must refuse to run where it cannot work
+        run: |
+          # Each of these asserts a refusal, not a success. Reading the rc the other way round would
+          # turn "the guard works" into "preflight passed on hardware that does not exist", which is
+          # the claim this repository refuses to make.
+          help_rc=0; check_rc=0
+          bash "$TF_UNPACKED/deploy/bare-metal/install.sh" --help >/dev/null || help_rc=$?
+          [[ $help_rc -eq 0 ]] || { echo "::error::--help exited $help_rc"; exit 1; }
+
+          out=$(bash "$TF_UNPACKED/deploy/bare-metal/install.sh" --check-only 2>&1) || check_rc=$?
+          [[ $check_rc -ne 0 ]] || { echo "::error::the installer did not refuse to run as the CI user"; exit 1; }
+          grep -qi 'run as root' <<<"$out" ||
+            { echo "::error::refused for an unexpected reason:"; echo "$out"; exit 1; }
+
+          # Same script, this time as root inside a container: the guard there is PID 1 / /.dockerenv.
+          docker run --rm -v "$GITHUB_WORKSPACE:/w:ro" -w /w --entrypoint bash ubuntu:24.04 -c '
+            out=$(bash /w/TrustForge/deploy/bare-metal/install.sh --check-only 2>&1); rc=$?
+            echo "container refusal output:"; echo "$out"
+            [[ $rc -ne 0 ]] || { echo "the installer did not refuse a container"; exit 1; }
+            echo "$out" | grep -qiE "not systemd|inside a container|container cgroup" ||
+              { echo "refused for an unexpected reason"; exit 1; }
+          '
+
+      - name: Hostile packages must be refused
+        run: |
+          work=$RUNNER_TEMP/hostile
+          rm -rf "$work"; install -d -m 0755 "$work"
+          top=$(tar -tzf "$TF_ASSETS/$TF_PKG" | head -1); top=${top%/}
+          bad=0
+          # Re-extracted from the archive for each case rather than copied: chmod on a hard-linked
+          # copy would mutate the tree the other cases are built from.
+          fresh() { rm -rf "$work/v"; install -d -m 0755 "$work/v"; tar -xzf "$TF_ASSETS/$TF_PKG" -C "$work/v"; }
+          refuse() {
+            local name=$1 archive=$2
+            if bash TrustForge/deploy/bare-metal/install.sh --validate-package "$archive" >"$work/$name.log" 2>&1; then
+              echo "::error::$name was accepted as a release package"; bad=1
+            else
+              # '  FAIL  ' is this installer's own verdict line. A bare FAIL also matches sha256sum's
+              # "file: FAILED", which reports the symptom rather than the check that rejected it.
+              echo "refused: $name - $(grep -m1 '^  FAIL  ' "$work/$name.log" | sed 's/^  FAIL  //')"
+            fi
+          }
+          # A symlink member plus cp -a during staging is an arbitrary write as root.
+          fresh; ln -sfn /etc/shadow "$work/v/$top/app/evil-link"
+          tar -czf "$work/symlink.tar.gz" -C "$work/v" "$top"
+          refuse symlink-member "$work/symlink.tar.gz"
+          # An absolute member name escapes the staging directory regardless of extraction flags.
+          fresh; tar -czf "$work/absolute.tar.gz" -P -C "$work/v/$top" . /etc/hostname 2>/dev/null
+          refuse absolute-member "$work/absolute.tar.gz"
+          # Someone else's expanded runtime file carries their real database password onto this host.
+          fresh; printf 'DB_PASSWORD=hunter2\n' >"$work/v/$top/deploy/bare-metal/trustforge.env"
+          tar -czf "$work/envfile.tar.gz" -C "$work/v" "$top"
+          refuse env-file-member "$work/envfile.tar.gz"
+          # The defect that made a published release uninstallable once: no exec bit on install.sh.
+          fresh; chmod 0644 "$work/v/$top/deploy/bare-metal/install.sh"
+          tar -czf "$work/noexec.tar.gz" -C "$work/v" "$top"
+          refuse install-sh-without-exec-bit "$work/noexec.tar.gz"
+          # Bytes that no longer match the archive's own manifest of them.
+          fresh; printf 'x' >>"$work/v/$top/app/TrustForge.deps.json"
+          tar -czf "$work/tampered.tar.gz" -C "$work/v" "$top"
+          refuse tampered-payload "$work/tampered.tar.gz"
+          exit $bad
+
+      - name: The release body must exist and be LF-clean
+        if: github.ref_type == 'tag'
+        run: |
+          notes=TrustForge/docs/release-notes/$GITHUB_REF_NAME.md
+          [[ -f $notes ]] ||
+            { echo "::error::$notes is missing; a release body comes from the repository, not from a guess"; exit 1; }
+          # gh release create takes this file verbatim, so a CR that survived normalisation would show
+          # up in the published body. Command substitution passes a real CR byte to grep.
+          if grep -q "$(printf '\r')" "$notes"; then
+            echo "::error::$notes contains CR characters; the release body would carry them"; exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: ${{ runner.temp }}/assets
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: verify
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve the version
+        run: |
+          version=$(awk -F'[<>]' '/<Version>/{print $3; exit}' TrustForge.Api/TrustForge.Api.csproj)
+          [[ $GITHUB_REF_NAME == "v$version" ]] ||
+            { echo "::error::tag $GITHUB_REF_NAME does not equal v$version"; exit 1; }
+          echo "TF_VERSION=$version" >>"$GITHUB_ENV"
+
+      # The bytes published are the bytes verify checked: they arrive as the artifact, never as a
+      # second build that could differ from it.
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: assets
+
+      - name: Re-verify what verify verified
+        run: |
+          cd assets
+          [[ $(find . -maxdepth 1 -type f | wc -l) -eq 5 ]] ||
+            { echo "::error::expected 5 assets in the artifact"; ls -l; exit 1; }
+          sha256sum -c "trustforge-$TF_VERSION-linux.tar.gz.sha256" \
+                       "trustforge-$TF_VERSION-source.tar.gz.sha256"
+
+      - name: Publish, then prove the published bytes round-trip
+        run: |
+          tag=$GITHUB_REF_NAME
+          notes=docs/release-notes/$tag.md
+          [[ -f $notes ]] || { echo "::error::$notes is missing"; exit 1; }
+          prerelease=()
+          [[ $tag =~ -((alpha|beta|rc|preview)[0-9.]*)$ ]] && prerelease=(--prerelease)
+
+          # Draft first: an upload that fails halfway must never leave a public release with three of
+          # five assets, or with a binary whose corresponding source is missing.
+          gh release create "$tag" --draft --title "TrustForge $tag" --notes-file "$notes" "${prerelease[@]}"
+          gh release upload "$tag" assets/* --clobber
+          # Downloaded from the release itself, so this checks what a user would fetch rather than
+          # what is still sitting in the runner's temp directory.
+          install -d -m 0755 "$RUNNER_TEMP/roundtrip"
+          gh release download "$tag" --dir "$RUNNER_TEMP/roundtrip"
+          (cd "$RUNNER_TEMP/roundtrip" &&
+            sha256sum -c "trustforge-$TF_VERSION-linux.tar.gz.sha256" \
+                         "trustforge-$TF_VERSION-source.tar.gz.sha256")
+          count=$(gh release view "$tag" --json assets --jq '.assets | length')
+          [[ $count -eq 5 ]] || { echo "::error::release carries $count assets, expected 5"; exit 1; }
+          gh release edit "$tag" --draft=false
+          echo "published https://github.com/$GITHUB_REPOSITORY/releases/tag/$tag"

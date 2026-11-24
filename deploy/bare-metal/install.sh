@@ -44,6 +44,25 @@ TECH_LIBRARY=
 DB_PASSWORD=
 DB_PASSWORD_ORIGIN=
 
+# source            a repository checkout, built on this host (the original behaviour)
+# package-extracted an unpacked release package, run as ./deploy/bare-metal/install.sh from inside it
+# package-file      a release archive handed over with --package-file, extracted here
+INSTALL_MODE=source
+PKG_ROOT=
+PKG_TOP=
+PKG_STAGE=
+PACKAGE_FILE=
+VALIDATE_PACKAGE=
+SOURCE_DIR_GIVEN=0
+LIBRARY_GIVEN=0
+PKG_VERSION=unknown
+PKG_GIT_SHA=unknown
+PKG_GIT_SHA_SHORT=unknown
+PKG_LIBRARY_SHA=unknown
+# The unit and the env template always live beside install.sh: the package deliberately keeps the
+# deploy/bare-metal depth so this seam resolves identically in a checkout and in an unpacked release.
+DEPLOY_DIR=$SCRIPT_DIR
+
 pass=0
 fail=0
 note=0
@@ -53,17 +72,33 @@ usage() {
 Usage: install.sh [OPTION]...
 
 Installs TrustForge (API + embedded DNS engine) with PostgreSQL 17 on a physical or virtual
-Ubuntu 24.04 host, with no container runtime. Run it as root. It refuses to run inside a
-container and refuses to coexist with a Docker deployment of TrustForge.
+Ubuntu 24.04 host, with no container runtime. Run it as root. It refuses to run inside a container
+and refuses to coexist with a Docker deployment of TrustForge.
+
+Two inputs are supported, and the choice between them is explicit rather than guessed:
+
+  from a source checkout   builds on this host, needing the .NET SDK, the sibling TechnitiumLibrary
+                           checkout and outbound access to api.nuget.org (the default here)
+  from a release package   installs the published application; --package-file ARCHIVE, or run this
+                           script from inside an unpacked package. No compiler is installed and no
+                           build happens, but the ASP.NET Core runtime is still fetched from dot.net
 
 Options:
   --check-only             Run the read-only preflight, then exit. No build, no changes.
   --dry-run                Preflight, then print the ordered mutation plan and exit.
                            Issues read-only network probes; leaves no state behind.
   --yes                    Never prompt.
-  --source-dir DIR         TrustForge checkout (default: this script's repository). The build
-                           runs on this host and needs a sibling TechnitiumLibrary checkout.
-  --technitium-library DIR Library checkout, when it is not the sibling of --source-dir.
+  --package-file ARCHIVE   Install from a release .tar.gz instead of building. Refuses the archive
+                           until its member listing, modes, manifest and checksums have passed;
+                           mutually exclusive with --source-dir and --technitium-library.
+  --validate-package ARCHIVE
+                           Check an archive the way an install would and exit. Never needs root,
+                           never touches the host, never installs anything.
+  --source-dir DIR         TrustForge checkout (default: this script's repository). Source mode only:
+                           passing it with a package is an error, because a package inside a
+                           checkout makes the install content ambiguous.
+  --technitium-library DIR Library checkout, when it is not the sibling of --source-dir. Source mode
+                           only, for the same reason.
   --skip-postgres          Do not install or provision PostgreSQL: the cluster, role, database and
                            password are yours already. Implies --db-password-file.
   --db-password-file FILE  File containing only the trustforge database password. Without it a
@@ -133,8 +168,10 @@ parse_args() {
             --yes) ASSUME_YES=1 ;;
             --reseed-dns) RESEED_DNS=1 ;;
             --skip-postgres) SKIP_POSTGRES=1 ;;
-            --source-dir) SOURCE_ROOT=${2:?--source-dir needs a path}; shift ;;
-            --technitium-library) TECH_LIBRARY=${2:?--technitium-library needs a path}; shift ;;
+            --source-dir) SOURCE_ROOT=${2:?--source-dir needs a path}; SOURCE_DIR_GIVEN=1; shift ;;
+            --technitium-library) TECH_LIBRARY=${2:?--technitium-library needs a path}; LIBRARY_GIVEN=1; shift ;;
+            --package-file) PACKAGE_FILE=${2:?--package-file needs an archive}; shift ;;
+            --validate-package) VALIDATE_PACKAGE=${2:?--validate-package needs an archive}; shift ;;
             --db-password-file) DB_PASSWORD_FILE=${2:?--db-password-file needs a path}; shift ;;
             --oidc-authority) OIDC_AUTHORITY=${2:?--oidc-authority needs a URL}; shift ;;
             --oidc-audience) OIDC_AUDIENCE=${2:?--oidc-audience needs a name}; shift ;;
@@ -150,6 +187,298 @@ resolve_library_dir() {
     parent=$(cd -- "$SOURCE_ROOT/.." && pwd)
     [[ -n $TECH_LIBRARY ]] || TECH_LIBRARY=$parent/TechnitiumLibrary
     TECH_LIBRARY=$(cd -- "$TECH_LIBRARY" 2>/dev/null && pwd) || TECH_LIBRARY=$parent/TechnitiumLibrary
+}
+
+# Flat, single-level string keys only, read with sed: jq is not in the ubuntu:24.04 base image and
+# this has to work on a host that has installed nothing yet. An unknown key yields an empty string,
+# which every caller then rejects rather than trusting.
+manifest_value() {
+    local key=$1 file=$2
+    # awk rather than `sed s:...:`: the pattern has to contain a literal colon, which is also what a
+    # sed delimiter would be, and no delimiter choice is safe against the characters a JSON value may
+    # hold. Matching the closing quote of the key name is what keeps "gitSha" from reading
+    # "gitShaShort", and the single exit is what keeps a pipe out of it under pipefail.
+    awk -v key="$key" '
+        { p = index($0, "\"" key "\":")
+          if (p > 0) {
+              rest = substr($0, p + length(key) + 3)
+              if (match(rest, /"[^"]*"/)) {
+                  print substr(rest, RSTART + 1, RLENGTH - 2)
+                  exit
+              }
+          }
+        }' "$file"
+}
+
+# A release archive is bytes fetched from the internet that this script then reads as root, so the
+# listing is judged before anything is written and the extracted tree is judged again afterwards.
+# tar is told to drop ownership; the mode and type checks below are what stop a hostile member from
+# becoming an arbitrary write, and nothing here trusts a count it did not just re-derive.
+check_package_listing() {
+    local archive=$1 names verbose top offenders big
+    names=$(tar -tzf "$archive" 2>/dev/null) || { bad "$archive is not a readable gzip tar archive."; return 1; }
+    verbose=$(tar -tvzf "$archive" 2>/dev/null || true)
+    [[ -n $names ]] || { bad "$archive contains no members."; return 1; }
+
+    top=$(head -1 <<<"$names")
+    top=${top%%/*}
+    [[ -n $top && $top != "$names" && ! $top =~ / ]] ||
+        { bad "$archive has no single top-level directory."; return 1; }
+    if grep -qE '^/|(^|/)\.\.(/|$)|[[:space:]]' <<<"$names"; then
+        bad "archive member names include an absolute path, a .. component, or whitespace."
+        return 1
+    fi
+    offenders=$(grep -v "^$top/" <<<"$names" || true)
+    if [[ -n $offenders ]]; then
+        bad "archive has members outside the single top-level directory $top/."
+        head -3 <<<"$offenders" | sed 's/^/        /' >&2
+        return 1
+    fi
+    if grep -qE '(^|/)(\.git|node_modules)(/|$)' <<<"$names"; then
+        bad "archive carries a VCS or node_modules directory."
+        return 1
+    fi
+    # A *.env here is the expanded runtime file from somebody else's host, which would carry their
+    # real database password into this one; secrets and private keys are the same story with a key.
+    if grep -qE '\.(env|pem|key|p12|pfx|credential)$|(^|/)secrets(/|$)' <<<"$names"; then
+        bad "archive carries a file that can hold a secret (*.env, *.pem, *.key, secrets/)."
+        return 1
+    fi
+    # Every mode test below collects its offenders into a variable and matches against a here-string.
+    # `awk … | grep -q .` would be the shorter form and is wrong: grep exits at the first match, awk
+    # then dies of SIGPIPE, pipefail turns that into a non-zero pipeline, and a hostile member
+    # silently reads as "no member matched".
+    local modes badmode
+    modes=$(awk '{print $1}' <<<"$verbose")
+    if grep -qE '^l|^b|^c|^p|^s' <<<"$modes"; then
+        bad "archive carries a symlink, device, FIFO or shadow member; only files and directories install."
+        return 1
+    fi
+    badmode=$(awk '{ m = $1
+                     if (substr(m, 4, 1) ~ /[sS]/ || substr(m, 7, 1) ~ /[sS]/ || substr(m, 10, 1) ~ /[tT]/ ||
+                         substr(m, 6, 1) ~ /[wW]/ || substr(m, 9, 1) ~ /[wW]/) print }' <<<"$verbose")
+    if [[ -n $badmode ]]; then
+        bad "archive carries a setuid, setgid, sticky, group-writable or world-writable member."
+        head -3 <<<"$badmode" | sed 's/^/        /' >&2
+        return 1
+    fi
+    # Sizes are field 3 of tar -tv. One oversized member is how a compressed archive turns into a
+    # full /var/tmp, and nothing in a TrustForge publish output comes close to this bound.
+    big=$(awk '$3 > 209715200 { print $3 " " $NF }' <<<"$verbose")
+    if [[ -n $big ]]; then
+        bad "archive carries a member over 200 MiB:"
+        head -3 <<<"$big" | sed 's/^/        /' >&2
+        return 1
+    fi
+    if ! grep -q '^\-rwxr-xr-x .*deploy/bare-metal/install\.sh$' <<<"$verbose"; then
+        bad "archive's install.sh is not a mode 0755 regular file."
+        return 1
+    fi
+    PKG_TOP=$top
+    return 0
+}
+
+check_package_tree() {
+    # Argument is the package's own root directory (the one holding MANIFEST.json and app/).
+    local p=$1 special secret
+    local required=(
+        MANIFEST.json SHA256SUMS README.md
+        app/TrustForge.dll app/TrustForge.runtimeconfig.json app/TrustForge.deps.json
+        app/DnsServerCore.dll app/TechnitiumLibrary.Net.dll
+        app/www/index.html app/dohwww/index.html app/named.root app/root-anchors.xml
+        deploy/bare-metal/install.sh deploy/bare-metal/trustforge.service
+        deploy/bare-metal/trustforge.env.example docs/BAREMETAL.md
+    )
+    local missing=0 name
+    for name in "${required[@]}"; do
+        [[ -e $p/$name ]] || { bad "the package has no $name"; missing=1; }
+    done
+    [[ $missing -eq 0 ]] || return 1
+
+    # A self-contained publish would work here too, but it is not what this repository ships, it
+    # changes the runtime install requirement, and silently mixing the two is how a host ends up
+    # running an artifact nobody documented.
+    if [[ -e $p/app/libcoreclr.so ]]; then
+        bad "the package is self-contained; this installer ships framework-dependent releases only."
+        return 1
+    fi
+    grep -q 'Microsoft.AspNetCore.App' "$p/app/TrustForge.runtimeconfig.json" ||
+        { bad "app/TrustForge.runtimeconfig.json does not reference ASP.NET Core; not a TrustForge publish output."; return 1; }
+    [[ -x $p/deploy/bare-metal/install.sh ]] ||
+        { bad "the package's install.sh is not executable."; return 1; }
+
+    special=$(find "$p" \( -type l -o -type b -o -type c -o -type p -o -type s \) -print 2>/dev/null)
+    if [[ -n $special ]]; then
+        bad "the extracted package contains a symlink or special file:"
+        head -3 <<<"$special" | sed 's/^/        /' >&2
+        return 1
+    fi
+    secret=$(find "$p" \( -name '*.env' -o -name '*.pem' -o -name '*.key' -o -name '*.p12' \
+        -o -path '*/secrets/*' \) -print 2>/dev/null)
+    if [[ -n $secret ]]; then
+        bad "the extracted package contains a file that can hold a secret:"
+        head -3 <<<"$secret" | sed 's/^/        /' >&2
+        return 1
+    fi
+    if grep -rlqI -e $'\r' "$p/deploy" 2>/dev/null; then
+        bad "CRLF in the package's deploy/ directory: systemd rejects the unit and the env template gains carriage returns."
+        return 1
+    fi
+    local token n
+    for token in __TF_DB_PASSWORD__ __TF_OIDC_AUTHORITY__ __TF_OIDC_AUDIENCE__; do
+        n=$(grep -c -- "$token" "$p/deploy/bare-metal/trustforge.env.example" || true)
+        [[ $n == 1 ]] || { bad "trustforge.env.example does not carry $token exactly once."; return 1; }
+    done
+
+    # The archive's own SHA256SUMS covers the members it shipped with. A mismatch is either corruption
+    # or a package assembled from more than one build; either way the bytes here are not the bytes
+    # that were published.
+    if ! (cd "$p" && sha256sum -c --quiet SHA256SUMS); then
+        bad "SHA256SUMS does not verify inside the extracted package."
+        return 1
+    fi
+    return 0
+}
+
+read_package_manifest() {
+    local root=$1 file version sha sha_short lib_sha product format
+    file=$root/MANIFEST.json
+    [[ -r $file ]] || { bad "the package has no readable MANIFEST.json."; return 1; }
+    product=$(manifest_value product "$file")
+    format=$(manifest_value packageFormat "$file")
+    version=$(manifest_value version "$file")
+    sha=$(manifest_value gitSha "$file")
+    sha_short=$(manifest_value gitShaShort "$file")
+    lib_sha=$(manifest_value libraryGitSha "$file")
+    [[ $product == trustforge ]] ||
+        { bad "MANIFEST.json product is '${product:-empty}', not trustforge."; return 1; }
+    [[ $format == 1 ]] ||
+        { bad "MANIFEST.json packageFormat is '${format:-empty}'; this installer understands format 1."; return 1; }
+    [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+        { bad "MANIFEST.json version is '$version', which is not a numeric triple."; return 1; }
+    # Anything taken from the archive is interpolated into $STATE_FILE later, so it is validated
+    # here, at the boundary, rather than trusting a published file to be well-behaved.
+    assert_shell_safe_value "the package version" "$version"
+    PKG_VERSION=$version
+    # Editing a manifest and re-signing it defeats SHA256SUMS, so the second witness is the name the
+    # operator downloaded: make-package.sh derives both from the same <Version>, and if they disagree
+    # then the provenance and the application bytes come from different builds.
+    local witness
+    for witness in "$PKG_TOP" "${PACKAGE_FILE:-}"; do
+        [[ -n $witness ]] || continue
+        witness=$(basename -- "$witness")
+        if [[ $witness =~ ^trustforge-([0-9]+\.[0-9]+\.[0-9]+) ]]; then
+            [[ ${BASH_REMATCH[1]} == "$version" ]] ||
+                { bad "$witness is named for ${BASH_REMATCH[1]} but MANIFEST.json says $version."; return 1; }
+        fi
+    done
+    local candidate
+    for candidate in "$sha_short" "$lib_sha"; do
+        if [[ $candidate != unknown && ! $candidate =~ ^[0-9a-f]{7,40}$ ]]; then
+            bad "MANIFEST.json records a git SHA that is not hexadecimal: $candidate"
+            return 1
+        fi
+    done
+    PKG_GIT_SHA=$sha
+    PKG_GIT_SHA_SHORT=$sha_short
+    PKG_LIBRARY_SHA=$lib_sha
+    ok "package manifest: version ${PKG_VERSION}, TrustForge ${PKG_GIT_SHA}, library ${PKG_LIBRARY_SHA}"
+    return 0
+}
+
+validate_package_archive() {
+    local archive=$1 dir=$2 errors_before=$fail rc=0
+    check_package_listing "$archive" &&
+        extract_package "$archive" "$dir" &&
+        check_package_tree "$dir/$PKG_TOP" &&
+        read_package_manifest "$dir/$PKG_TOP"
+    rc=$?
+    if [[ $rc -eq 0 && $fail -eq $errors_before ]]; then
+        ok "release package $archive is acceptable"
+    fi
+    return $rc
+}
+
+# The --validate-package entry point: unpacks into a private temporary directory, judges it, and
+# leaves nothing behind. It reports through ok/bad like the rest of preflight, plus one verdict line
+# so a script wrapping this command has something unambiguous to read.
+validate_package_entry() {
+    local archive=$1 dir rc=0
+    [[ -f $archive ]] || { printf 'FAIL: %s is not a regular file.\n' "$archive" >&2; return 1; }
+    dir=$(mktemp -d "${TMPDIR:-/var/tmp}/trustforge-validate.XXXXXX") ||
+        { printf 'FAIL: cannot create a temporary directory.\n' >&2; return 1; }
+    if validate_package_archive "$archive" "$dir"; then
+        printf 'PASS: %s is a valid TrustForge release package (version %s, git %s).\n' \
+            "$archive" "$PKG_VERSION" "$PKG_GIT_SHA_SHORT"
+    else
+        printf 'FAIL: %s is not a valid TrustForge release package.\n' "$archive" >&2
+        rc=1
+    fi
+    rm -rf "$dir"
+    return $rc
+}
+
+extract_package() {
+    local archive=$1 dir=$2
+    install -d -m 0700 "$dir" || { bad "cannot create $dir"; return 1; }
+    # --no-same-owner: an archive must not be able to place members as uid 0's own account or as any
+    # other identity it names. The tree lands in a 0700 directory owned by whoever ran this script.
+    tar -xz --no-same-owner -f "$archive" -C "$dir" || { bad "extracting $archive failed"; return 1; }
+    return 0
+}
+
+select_install_mode() {
+    if [[ -n $PACKAGE_FILE ]]; then
+        INSTALL_MODE=package-file
+        [[ -r $PACKAGE_FILE ]] || die "$PACKAGE_FILE is not readable."
+    elif [[ -f $REPO_ROOT/MANIFEST.json && -e $REPO_ROOT/app/TrustForge.dll ]]; then
+        if [[ -d $REPO_ROOT/TrustForge.Api ]]; then
+            die "$REPO_ROOT holds both a release package (MANIFEST.json, app/) and a source checkout (TrustForge.Api/). Unpack the package into its own directory: which release to install would otherwise be a guess."
+        fi
+        INSTALL_MODE=package-extracted
+        PKG_ROOT=$REPO_ROOT
+        PKG_TOP=$(basename -- "$REPO_ROOT")
+    else
+        INSTALL_MODE=source
+    fi
+
+    if [[ $INSTALL_MODE != source ]]; then
+        # Refused rather than ignored: an option that selects build inputs cannot mean anything when
+        # nothing is compiled, and silently dropping it would let an operator believe they chose a
+        # library revision that the package does not contain.
+        [[ $SOURCE_DIR_GIVEN -eq 0 ]] ||
+            die "--source-dir selects what to build. Nothing is built from a release package, so it does not apply here; drop it, or install from the checkout instead."
+        [[ $LIBRARY_GIVEN -eq 0 ]] ||
+            die "--technitium-library selects what to build. Nothing is built from a release package, whose library revision is recorded in MANIFEST.json instead."
+    fi
+    DEPLOY_DIR=$SCRIPT_DIR
+    return 0
+}
+
+# The archive is unpacked into its own temporary directory rather than into $BUILD_ROOT, because this
+# runs during preflight too: --check-only and --dry-run must stay non-mutating, and a throwaway under
+# TMPDIR that the EXIT trap deletes is the one thing they can create without leaving a trace.
+prepare_package_stage() {
+    local root=$fail
+    [[ $INSTALL_MODE == package-file ]] || return 0
+    PKG_STAGE=$(mktemp -d "${TMPDIR:-/var/tmp}/trustforge-package.XXXXXX") ||
+        die "cannot create a staging directory under ${TMPDIR:-/var/tmp}."
+    # main() installs the matching cleanup; --check-only and --dry-run reach here before it does, so
+    # the same trap is installed for them as well rather than leaving the scratch tree behind.
+    trap 'cleanup_package_stage; rm -rf "$BUILD_ROOT"' EXIT
+    log "validating and unpacking $PACKAGE_FILE"
+    if ! validate_package_archive "$PACKAGE_FILE" "$PKG_STAGE"; then
+        die "$PACKAGE_FILE is not acceptable as a release package; nothing was installed."
+    fi
+    [[ $fail -eq $root ]] || die "$PACKAGE_FILE failed package validation."
+    PKG_ROOT=$PKG_STAGE/$PKG_TOP
+    DEPLOY_DIR=$PKG_ROOT/deploy/bare-metal
+    log "package ${PKG_VERSION} unpacked in $PKG_ROOT"
+}
+
+cleanup_package_stage() {
+    [[ -n $PKG_STAGE && -d $PKG_STAGE ]] && rm -rf "$PKG_STAGE"
+    return 0
 }
 
 require_root_and_systemd() {
@@ -176,9 +505,13 @@ require_ubuntu_2404() {
 }
 
 require_build_inputs() {
+    if [[ $INSTALL_MODE != source ]]; then
+        require_package_inputs
+        return 0
+    fi
     [[ -f $SOURCE_ROOT/TrustForge.Api/TrustForge.Api.csproj ]] ||
         die "$SOURCE_ROOT has no TrustForge.Api project; pass --source-dir."
-    [[ -f $SCRIPT_DIR/trustforge.service && -f $SCRIPT_DIR/trustforge.env.example ]] ||
+    [[ -f $DEPLOY_DIR/trustforge.service && -f $DEPLOY_DIR/trustforge.env.example ]] ||
         die "trustforge.service / trustforge.env.example are missing beside install.sh."
     if [[ ! -d $TECH_LIBRARY ]]; then
         bad "no TechnitiumLibrary checkout at $TECH_LIBRARY (Dockerfile:1-12 compiles against it)."
@@ -191,6 +524,28 @@ require_build_inputs() {
     done
     [[ $missing -eq 0 ]] && ok "TechnitiumLibrary present with all three projects"
     [[ -f $SOURCE_ROOT/Dockerfile ]] || hint "$SOURCE_ROOT/Dockerfile is absent; the build mirrors it step for step."
+    return 0
+}
+
+# In package mode the assertion is about the application, not about a compiler: these are the files
+# the unit, the DNS console and the ACME pipeline all reach for, and a package missing one of them is
+# not a TrustForge release whatever its manifest claims.
+require_package_inputs() {
+    [[ -f $DEPLOY_DIR/trustforge.service ]] ||
+        die "$DEPLOY_DIR/trustforge.service is missing; the package does not carry its unit file."
+    [[ -f $DEPLOY_DIR/trustforge.env.example ]] ||
+        die "$DEPLOY_DIR/trustforge.env.example is missing; the installer templates its configuration from that file."
+    if [[ $INSTALL_MODE == package-extracted ]]; then
+        local root=$fail
+        check_package_tree "$PKG_ROOT" || true
+        read_package_manifest "$PKG_ROOT" || true
+        if ((fail > root)); then
+            probe "re-download the release and unpack it into a fresh directory; do not patch a package in place."
+            return 0
+        fi
+    fi
+    ok "installing release ${PKG_VERSION} from a package (TrustForge ${PKG_GIT_SHA_SHORT}, library ${PKG_LIBRARY_SHA})"
+    hint "no compiler runs on this host: the application bytes are the ones that were published."
     return 0
 }
 
@@ -311,13 +666,22 @@ check_resources_and_time() {
 }
 
 check_outbound() {
+    # api.nuget.org is only worth probing when something on this host is about to restore packages.
+    # In package mode the bytes are already published, so demanding the feed would be a lie in the
+    # preflight and an unnecessary failure for an air-gapped-ish mirror of dot.net plus PGDG.
+    local urls=("$DOTNET_INSTALL_URL")
+    if [[ $INSTALL_MODE == source ]]; then
+        urls+=(https://api.nuget.org/v3/index.json)
+    fi
+    if [[ $SKIP_POSTGRES -eq 0 ]]; then
+        urls+=("https://apt.postgresql.org/pub/repos/apt/dists/noble-pgdg/Release")
+    fi
     local url
-    for url in "$DOTNET_INSTALL_URL" https://api.nuget.org/v3/index.json \
-        "https://apt.postgresql.org/pub/repos/apt/dists/noble-pgdg/Release"; do
+    for url in "${urls[@]}"; do
         if curl -fsS --max-time 20 -o /dev/null "$url"; then
             ok "reachable: $url"
         else
-            bad "unreachable: $url. The build runs on this host and needs it."
+            bad "unreachable: $url. The install needs it from this host."
         fi
     done
     if [[ -n $OIDC_AUTHORITY ]]; then
@@ -356,6 +720,17 @@ run_preflight() {
 }
 
 print_plan() {
+    # Step 5 is where the modes diverge, and --dry-run must not promise a compile that package mode
+    # never performs.
+    local build_line
+    if [[ $INSTALL_MODE == source ]]; then
+        build_line="  5  install the .NET SDK into $BUILD_ROOT/dotnet-sdk, build the three TechnitiumLibrary projects,
+     publish TrustForge.Api there, then rm -rf $BUILD_ROOT (no SDK, no NuGet cache, no sources left)"
+    else
+        build_line="  5  verify $(basename -- "$PACKAGE_FILE" 2>/dev/null || echo "the unpacked package") against its own SHA256SUMS,
+     unpack it into a private 0700 scratch directory, re-check the extracted tree, then rm -rf it;
+     nothing here is compiled on this host"
+    fi
     cat <<EOF
 
 Ordered mutations that would follow:
@@ -365,9 +740,8 @@ Ordered mutations that would follow:
   3  fetch $MS_REPO_DEB for libmsquic; failure here only costs DoQ/DoH3
   4  install the ASP.NET Core $DOTNET_CHANNEL runtime into $RUNTIME_ROOT (permanent), link
      /usr/bin/dotnet only when absent
-  5  install the .NET SDK into $BUILD_ROOT/dotnet-sdk, build the three TechnitiumLibrary projects,
-     publish TrustForge.Api there, then rm -rf $BUILD_ROOT (no SDK, no NuGet cache, no sources left)
-  6  stage the publish output as $APP_ROOT/app/<release-id>, flip $APP_ROOT/app/current atomically
+$build_line
+  6  stage the release bytes as $APP_ROOT/app/<release-id>, flip $APP_ROOT/app/current atomically
   7  useradd --system $SERVICE_USER; create $DNS_CONFIG_DIR $DATA_ROOT $ARTIFACT_DIR $DNS_LOG_DIR
      (0750 $SERVICE_USER) and $SECRETS_DIR (0750 root:$SERVICE_USER, files 0640) - the secrets
      directory stays out of the unit's ReadWritePaths so it remains read-only under the host
@@ -446,6 +820,18 @@ install_dotnet_runtime() {
     ok "ASP.NET Core $DOTNET_CHANNEL runtime available"
 }
 
+stage_release_dir() {
+    local src=$1 release_id=$2
+    install -d -m 0755 "$APP_ROOT/app/$release_id"
+    cp -a "$src/." "$APP_ROOT/app/$release_id/"
+    # Renamed into place rather than repointed: a reader following 'current' mid-upgrade sees either
+    # whole release, never a half-copied one.
+    ln -sfn "$APP_ROOT/app/$release_id" "$APP_ROOT/app/.current.new"
+    mv -T "$APP_ROOT/app/.current.new" "$APP_ROOT/app/current"
+    chmod -R a-w "$APP_ROOT/app/$release_id"
+    ok "release $release_id staged and 'current' flipped"
+}
+
 build_and_stage_release() {
     local release_id=$1
     local sdk_dir=$BUILD_ROOT/dotnet-sdk publish_dir=$BUILD_ROOT/publish
@@ -476,12 +862,13 @@ build_and_stage_release() {
         die "the build or publish failed. The existing release and its 'current' symlink are untouched; see $INSTALL_LOG"
     [[ -f $publish_dir/TrustForge.dll ]] || die "publish produced no TrustForge.dll; see $INSTALL_LOG"
 
-    install -d -m 0755 "$APP_ROOT/app/$release_id"
-    cp -a "$publish_dir/." "$APP_ROOT/app/$release_id/"
-    ln -sfn "$APP_ROOT/app/$release_id" "$APP_ROOT/app/.current.new"
-    mv -T "$APP_ROOT/app/.current.new" "$APP_ROOT/app/current"
-    chmod -R a-w "$APP_ROOT/app/$release_id"
-    ok "release $release_id staged and 'current' flipped"
+    stage_release_dir "$publish_dir" "$release_id"
+}
+
+stage_package_release() {
+    local release_id=$1
+    [[ -f $PKG_ROOT/app/TrustForge.dll ]] || die "$PKG_ROOT/app/TrustForge.dll is missing."
+    stage_release_dir "$PKG_ROOT/app" "$release_id"
 }
 
 prune_releases() {
@@ -539,7 +926,7 @@ generate_env_file() {
         install -m 0600 -o root -g root "$ENV_FILE" "$ENV_FILE.bak.$(date +%s)"
         log "existing $ENV_FILE backed up beside it"
     else
-        install -m 0600 -o root -g root "$SCRIPT_DIR/trustforge.env.example" "$ENV_FILE"
+        install -m 0600 -o root -g root "$DEPLOY_DIR/trustforge.env.example" "$ENV_FILE"
     fi
     if grep -q '__TF_' "$ENV_FILE"; then
         sed -i "s|__TF_DB_PASSWORD__|$DB_PASSWORD|g; s|__TF_OIDC_AUTHORITY__|$OIDC_AUTHORITY|g; s|__TF_OIDC_AUDIENCE__|$OIDC_AUDIENCE|g" "$ENV_FILE"
@@ -626,7 +1013,7 @@ run_migrations() {
 }
 
 install_unit() {
-    install -m 0644 -o root -g root "$SCRIPT_DIR/trustforge.service" "$UNIT_FILE"
+    install -m 0644 -o root -g root "$DEPLOY_DIR/trustforge.service" "$UNIT_FILE"
     local verify
     verify=$(systemd-analyze verify "$UNIT_FILE" 2>&1 || true)
     if [[ -n $verify ]]; then
@@ -668,13 +1055,39 @@ verify_runtime() {
 
 write_state() {
     local release_id=$1
+    local mode library_sha pkg_file extra='' src_root='' lib_dir=''
+
+    # The package values come from a manifest inside a downloaded archive, so nothing reaches this
+    # heredoc that read_package_manifest did not already restrict: one unescaped quote would corrupt
+    # the file the upgrade and rollback procedures trust to say what is installed here.
+    if [[ $INSTALL_MODE == source ]]; then
+        mode=built-on-target
+        src_root=$SOURCE_ROOT
+        lib_dir=$TECH_LIBRARY
+        library_sha=$(git -C "$TECH_LIBRARY" rev-parse HEAD 2>/dev/null || printf 'unknown')
+    else
+        mode=package
+        library_sha=$PKG_LIBRARY_SHA
+        assert_shell_safe_value "packageVersion" "$PKG_VERSION"
+        assert_shell_safe_value "packageGitSha" "$PKG_GIT_SHA"
+        assert_shell_safe_value "packageLibrarySha" "$PKG_LIBRARY_SHA"
+        pkg_file=$(basename -- "${PACKAGE_FILE:-$PKG_TOP}")
+        extra="  \"packageFile\": \"$pkg_file\",
+  \"packageVersion\": \"$PKG_VERSION\",
+  \"packageGitSha\": \"$PKG_GIT_SHA\",
+  \"packageLibrarySha\": \"$PKG_LIBRARY_SHA\",
+"
+    fi
+
     cat >"$STATE_FILE" <<EOF
 {
   "installedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "release": "$release_id",
-  "sourceRoot": "$SOURCE_ROOT",
-  "technitiumLibrary": "$TECH_LIBRARY",
-  "secretsDir": "$SECRETS_DIR",
+  "installMode": "$mode",
+  "sourceRoot": "$src_root",
+  "technitiumLibrary": "$lib_dir",
+  "libraryGitSha": "$library_sha",
+$extra  "secretsDir": "$SECRETS_DIR",
   "dnsConfigDir": "$DNS_CONFIG_DIR",
   "artifactDir": "$ARTIFACT_DIR",
   "postgres": "$([[ $SKIP_POSTGRES -eq 1 ]] && printf external || printf local-%s "$PG_VERSION")",
@@ -703,15 +1116,32 @@ reseed_dns_config() {
 
 main() {
     parse_args "$@"
-    resolve_library_dir
+
+    # Deliberately before require_root_and_systemd and before any $INSTALL_LOG exists: judging a
+    # published asset is something an operator (or CI) must be able to do as an unprivileged user on
+    # a host that will never run TrustForge, and it must change nothing.
+    if [[ -n $VALIDATE_PACKAGE ]]; then
+        validate_package_entry "$VALIDATE_PACKAGE"
+        return $?
+    fi
+
+    select_install_mode
+    if [[ $INSTALL_MODE == source ]]; then
+        resolve_library_dir
+    fi
 
     if [[ $CHECK_ONLY -eq 0 && $DRY_RUN -eq 0 ]]; then
+        # Both values are required and neither is guessable, so they are asked for rather than
+        # defaulted. The read failure is fatal rather than a retry: with no terminal (CI, cron, a
+        # pipe) an empty reply would loop here forever instead of saying what to pass.
         while [[ -z $OIDC_AUTHORITY ]]; do
-            printf 'HTTPS OIDC issuer URL: ' >/dev/tty
+            printf 'HTTPS OIDC issuer URL: ' >/dev/tty ||
+                die "no terminal to ask for the OIDC issuer on: pass --oidc-authority URL."
             IFS= read -r OIDC_AUTHORITY </dev/tty || OIDC_AUTHORITY=
         done
         while [[ -z $OIDC_AUDIENCE ]]; do
-            printf 'TrustForge API audience: ' >/dev/tty
+            printf 'TrustForge API audience: ' >/dev/tty ||
+                die "no terminal to ask for the API audience on: pass --oidc-audience NAME."
             IFS= read -r OIDC_AUDIENCE </dev/tty || OIDC_AUDIENCE=
         done
         [[ $OIDC_AUTHORITY == https://* ]] ||
@@ -721,6 +1151,9 @@ main() {
     fi
 
     require_root_and_systemd
+    # Judged and unpacked here, immediately before preflight, so that "this release is acceptable" is
+    # a checked claim rather than an assumption; the scratch tree goes with the build tree on exit.
+    prepare_package_stage
     run_preflight
     [[ $CHECK_ONLY -eq 1 ]] && { log "--check-only: stopping, nothing changed."; return 0; }
     [[ $DRY_RUN -eq 1 ]] && { print_plan; log "--dry-run: nothing changed."; return 0; }
@@ -729,21 +1162,31 @@ main() {
     # $INSTALL_LOG, which lives under $APP_ROOT and is the redirect target of the build step.
     install -d -m 0755 "$APP_ROOT"
     install -d -m 0700 "$BUILD_ROOT"
-    trap 'rm -rf "$BUILD_ROOT"' EXIT
+    trap 'cleanup_package_stage; rm -rf "$BUILD_ROOT"' EXIT
     : >>"$INSTALL_LOG" || die "cannot write $INSTALL_LOG."
 
     record_existing_decisions
     reseed_dns_config
 
     local release_id
-    release_id="$(git -C "$SOURCE_ROOT" rev-parse --short HEAD 2>/dev/null || printf 'local')-$(date +%Y%m%d%H%M%S)"
+    if [[ $INSTALL_MODE == source ]]; then
+        release_id="$(git -C "$SOURCE_ROOT" rev-parse --short HEAD 2>/dev/null || printf 'local')-$(date +%Y%m%d%H%M%S)"
+    else
+        # The timestamp suffix is kept even though the version and SHA are known: re-installing the
+        # same package would otherwise collide with the previous directory, which is chmod a-w.
+        release_id="${PKG_VERSION}-${PKG_GIT_SHA_SHORT}-$(date +%Y%m%d%H%M%S)"
+    fi
 
     log "installing TrustForge $release_id; build and service output append to $INSTALL_LOG"
     ensure_apt_prerequisites
     install_postgres_repo
     install_libmsquic
     install_dotnet_runtime
-    build_and_stage_release "$release_id"
+    if [[ $INSTALL_MODE == source ]]; then
+        build_and_stage_release "$release_id"
+    else
+        stage_package_release "$release_id"
+    fi
     create_service_account
     create_directories
 
