@@ -71,8 +71,8 @@ usage() {
     cat <<'EOF'
 Usage: make-package.sh --app-dir DIR [OPTION]...
 
-Assemble the five release assets: trustforge-<version>-linux.tar.gz (app/, deploy/bare-metal/, docs/,
-README.md, MANIFEST.json, SHA256SUMS inside), its detached .sha256, the same MANIFEST.json as a
+Assemble the five release assets: trustforge-<version>-linux.tar.gz (app/, deploy/bare-metal/, remote-helper/,
+docs/, README.md, MANIFEST.json, SHA256SUMS inside), its detached .sha256, the same MANIFEST.json as a
 standalone asset, the GPLv3 corresponding-source archive, and its detached .sha256. Nothing compiled.
 
 Options:
@@ -256,7 +256,7 @@ stage_tree() {
     find "$stage/$top/app" -type d -exec chmod 0755 {} +
     find "$stage/$top/app" -type f -exec chmod 0644 {} +
 
-    install -d -m 0755 "$stage/$top/deploy/bare-metal" "$stage/$top/docs"
+    install -d -m 0755 "$stage/$top/deploy/bare-metal" "$stage/$top/docs" "$stage/$top/remote-helper"
     for f in install.sh trustforge.service trustforge.env.example; do
         [[ -f $REPO_ROOT/deploy/bare-metal/$f ]] ||
             die "missing deploy/bare-metal/$f: the installer needs its own unit and env template,
@@ -270,13 +270,41 @@ which it resolves relative to the package root."
     chmod 0644 "$stage/$top/deploy/bare-metal/trustforge.service"
     chmod 0644 "$stage/$top/deploy/bare-metal/trustforge.env.example"
 
+    # Include initialization scripts for pre-deployment setup
+    for f in init-dns.sh init-certctl.sh init-nginx.sh init-step-ca.sh init-oidc.sh \
+             common.sh setup-acme-dns.sh setup-nginx-tls.sh setup-oidc.sh setup-step-ca.sh \
+             install-target-helper.sh build-and-verify-in-container.sh; do
+        [[ -f $REPO_ROOT/deploy/bare-metal/$f ]] ||
+            die "missing deploy/bare-metal/$f: required for complete deployment setup."
+        cp -p "$REPO_ROOT/deploy/bare-metal/$f" "$stage/$top/deploy/bare-metal/$f"
+        # init-*, setup-*, and build-and-verify scripts must be executable
+        if [[ $f == init-* ]] || [[ $f == setup-* ]] || [[ $f == build-and-verify* ]]; then
+            chmod 0755 "$stage/$top/deploy/bare-metal/$f"
+        else
+            chmod 0644 "$stage/$top/deploy/bare-metal/$f"
+        fi
+    done
+
+    # Include remote-helper components: trustforge-certctl binary and README
+    for f in trustforge-certctl README.md; do
+        [[ -f $REPO_ROOT/remote-helper/$f ]] ||
+            die "missing remote-helper/$f: required for target machine certificate deployment."
+        if [[ $f == trustforge-certctl ]]; then
+            cp -p "$REPO_ROOT/remote-helper/$f" "$stage/$top/remote-helper/$f"
+            chmod 0750 "$stage/$top/remote-helper/$f"
+        else
+            cp -p "$REPO_ROOT/remote-helper/$f" "$stage/$top/remote-helper/$f"
+            chmod 0644 "$stage/$top/remote-helper/$f"
+        fi
+    done
+
     for f in "${DOC_FILES[@]}"; do
         [[ -f $REPO_ROOT/$f ]] ||
             die "docs/$f is listed in DOC_FILES but does not exist in the repository."
         cp -p "$REPO_ROOT/$f" "$stage/$top/docs/$f"
         chmod 0644 "$stage/$top/docs/$f"
     done
-    log "staged app/, deploy/bare-metal/ and docs/ under $top/"
+    log "staged app/, deploy/bare-metal/, remote-helper/ and docs/ under $top/"
 }
 
 stage_readme() {

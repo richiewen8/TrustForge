@@ -43,6 +43,18 @@ OIDC_AUDIENCE=
 TECH_LIBRARY=
 DB_PASSWORD=
 DB_PASSWORD_ORIGIN=
+FREE_PORT_53=0
+ALLOW_UNREACHABLE_OIDC=0
+WITH_STEP_CA=0
+USE_APT_STEP_CA=0
+WITH_LOCAL_OIDC=0
+WITH_ACME_DNS=0
+WITH_SELF_TLS=0
+SETUP_ZONE=trustforge.internal
+API_DOMAIN=
+CA_DOMAIN=
+OIDC_DOMAIN=
+ADMIN_EMAIL=
 
 # source            a repository checkout, built on this host (the original behaviour)
 # package-extracted an unpacked release package, run as ./deploy/bare-metal/install.sh from inside it
@@ -103,8 +115,22 @@ Options:
                            password are yours already. Implies --db-password-file.
   --db-password-file FILE  File containing only the trustforge database password. Without it a
                            password is generated once and kept in /etc/trustforge/secrets.
-  --oidc-authority URL     HTTPS OIDC issuer. Required; the API throws without it.
-  --oidc-audience NAME     TrustForge API audience. Required.
+  --oidc-authority URL     HTTPS OIDC issuer. Required unless --with-local-oidc is set.
+  --oidc-audience NAME     TrustForge API audience (default with --with-local-oidc: trustforge-api).
+  --allow-unreachable-oidc Allow installing even when OIDC discovery is unreachable right now.
+  --free-port-53           Disable systemd-resolved stub listener if it holds port 53 and point
+                           /etc/resolv.conf at TrustForge (127.0.0.1) once DNS is listening.
+  --with-step-ca           Also install and start local Smallstep step-ca (ACME + CRL).
+  --use-apt-step-ca        Use prebuilt step-ca from APT instead of building patched binary.
+  --with-local-oidc        Also install local Keycloak OIDC provider (requires HTTPS proxy or Dev).
+  --with-acme-dns          Also configure Technitium challenge zone, API token, and ACME worker.
+  --with-self-tls          Also install local trustforge-certctl and Nginx HTTPS reverse proxy.
+  --all-in-one             Enable --free-port-53 --with-step-ca --with-local-oidc --with-acme-dns --with-self-tls.
+  --zone ZONE              Challenge DNS zone for --with-acme-dns (default: trustforge.internal).
+  --api-domain FQDN        HTTPS domain for TrustForge API (default: api.<zone>).
+  --ca-domain FQDN         HTTPS domain for local step-ca (default: ca.<zone>).
+  --oidc-domain FQDN       HTTPS domain for local OIDC (default: id.<zone>).
+  --admin-email EMAIL      ACME account and OIDC admin email (default: ops@<zone>).
   --reseed-dns             Archive the existing first-boot DNS config and seed it again.
   -h, --help               This text.
 EOF
@@ -175,6 +201,25 @@ parse_args() {
             --db-password-file) DB_PASSWORD_FILE=${2:?--db-password-file needs a path}; shift ;;
             --oidc-authority) OIDC_AUTHORITY=${2:?--oidc-authority needs a URL}; shift ;;
             --oidc-audience) OIDC_AUDIENCE=${2:?--oidc-audience needs a name}; shift ;;
+            --allow-unreachable-oidc) ALLOW_UNREACHABLE_OIDC=1 ;;
+            --free-port-53) FREE_PORT_53=1 ;;
+            --with-step-ca) WITH_STEP_CA=1 ;;
+            --use-apt-step-ca) USE_APT_STEP_CA=1 ;;
+            --with-local-oidc) WITH_LOCAL_OIDC=1 ;;
+            --with-acme-dns) WITH_ACME_DNS=1 ;;
+            --with-self-tls) WITH_SELF_TLS=1 ;;
+            --all-in-one)
+                FREE_PORT_53=1
+                WITH_STEP_CA=1
+                WITH_LOCAL_OIDC=1
+                WITH_ACME_DNS=1
+                WITH_SELF_TLS=1
+                ;;
+            --zone) SETUP_ZONE=${2:?--zone needs a domain}; shift ;;
+            --api-domain) API_DOMAIN=${2:?--api-domain needs a hostname}; shift ;;
+            --ca-domain) CA_DOMAIN=${2:?--ca-domain needs a hostname}; shift ;;
+            --oidc-domain) OIDC_DOMAIN=${2:?--oidc-domain needs a hostname}; shift ;;
+            --admin-email) ADMIN_EMAIL=${2:?--admin-email needs an email}; shift ;;
             -h | --help) usage; exit 0 ;;
             *) usage >&2; die "unknown option: $1" ;;
         esac
@@ -274,6 +319,10 @@ check_package_listing() {
         bad "archive's install.sh is not a mode 0755 regular file."
         return 1
     fi
+    if ! grep -q '^\-rwxr-xr-x .*remote-helper/trustforge-certctl$' <<<"$verbose"; then
+        bad "archive's remote-helper/trustforge-certctl is missing or not mode 0755."
+        return 1
+    fi
     PKG_TOP=$top
     return 0
 }
@@ -287,7 +336,13 @@ check_package_tree() {
         app/DnsServerCore.dll app/TechnitiumLibrary.Net.dll
         app/www/index.html app/dohwww/index.html app/named.root app/root-anchors.xml
         deploy/bare-metal/install.sh deploy/bare-metal/trustforge.service
-        deploy/bare-metal/trustforge.env.example docs/BAREMETAL.md
+        deploy/bare-metal/trustforge.env.example
+        deploy/bare-metal/common.sh deploy/bare-metal/setup-step-ca.sh
+        deploy/bare-metal/setup-oidc.sh deploy/bare-metal/setup-acme-dns.sh
+        deploy/bare-metal/install-target-helper.sh deploy/bare-metal/setup-nginx-tls.sh
+        deploy/bare-metal/keycloak/trustforge-dev-realm.json
+        remote-helper/trustforge-certctl remote-helper/README.md
+        docs/BAREMETAL.md docs/BARE-METAL-GUIDE.md
     )
     local missing=0 name
     for name in "${required[@]}"; do
@@ -320,8 +375,8 @@ check_package_tree() {
         head -3 <<<"$secret" | sed 's/^/        /' >&2
         return 1
     fi
-    if grep -rlqI -e $'\r' "$p/deploy" 2>/dev/null; then
-        bad "CRLF in the package's deploy/ directory: systemd rejects the unit and the env template gains carriage returns."
+    if grep -rlqI -e $'\r' "$p/deploy" "$p/remote-helper" 2>/dev/null; then
+        bad "CRLF in the package's deploy/ or remote-helper/ directory: systemd rejects the unit and scripts/env templates break."
         return 1
     fi
     local token n
@@ -558,12 +613,17 @@ occupied_by() {
 check_ports() {
     # Port 53 cannot be moved: DnsServer.cs:464-599 exposes no address/port variable and
     # DnsServerHostedService.cs:24 passes throwIfBindFails:true, so a failed bind kills the API.
-    local proto label
+    local proto label owner
     for proto in t u; do
         label=tcp
         [[ $proto == u ]] && label=udp
         if port_listening "$proto" "$DNS_PORT"; then
-            bad "port 53/$label is taken by $(occupied_by "$proto" "$DNS_PORT")"
+            owner=$(occupied_by "$proto" "$DNS_PORT")
+            if [[ $FREE_PORT_53 -eq 1 && $owner == "systemd-resolve" ]]; then
+                hint "port 53/$label is held by systemd-resolved (will be released via --free-port-53 before starting trustforge)"
+            else
+                bad "port 53/$label is taken by $owner"
+            fi
         else
             ok "port 53/$label is free"
         fi
@@ -684,9 +744,11 @@ check_outbound() {
             bad "unreachable: $url. The install needs it from this host."
         fi
     done
-    if [[ -n $OIDC_AUTHORITY ]]; then
+    if [[ -n $OIDC_AUTHORITY && $WITH_LOCAL_OIDC -eq 0 ]]; then
         if curl -fsS --max-time 20 -o /dev/null "$OIDC_AUTHORITY/.well-known/openid-configuration"; then
             ok "OIDC discovery answers for $OIDC_AUTHORITY"
+        elif [[ $CHECK_ONLY -eq 0 && $DRY_RUN -eq 0 && $ALLOW_UNREACHABLE_OIDC -eq 0 ]]; then
+            bad "OIDC discovery failed for $OIDC_AUTHORITY (use a reachable issuer, --with-local-oidc, or --allow-unreachable-oidc)."
         else
             hint "OIDC discovery failed for $OIDC_AUTHORITY: the API will start, and every token check will then fail."
         fi
@@ -1114,6 +1176,131 @@ reseed_dns_config() {
     log "the previous DNS config is preserved in $archive"
 }
 
+free_port_53_stub() {
+    [[ $FREE_PORT_53 -eq 1 ]] || return 0
+    if ! port_listening t "$DNS_PORT" && ! port_listening u "$DNS_PORT"; then
+        return 0
+    fi
+    log "releasing port 53 from systemd-resolved stub listener (--free-port-53)"
+    install -d -m 0755 /etc/systemd/resolved.conf.d
+    printf '[Resolve]\nDNSStubListener=no\n' >/etc/systemd/resolved.conf.d/10-trustforge.conf
+    systemctl restart systemd-resolved
+    if port_listening t "$DNS_PORT" || port_listening u "$DNS_PORT"; then
+        die "port 53 is still occupied after disabling systemd-resolved DNSStubListener."
+    fi
+    ok "port 53 released from systemd-resolved"
+}
+
+switch_host_resolver_to_local() {
+    [[ $FREE_PORT_53 -eq 1 ]] || return 0
+    if [[ -L /etc/resolv.conf || -f /etc/resolv.conf ]]; then
+        cp -L /etc/resolv.conf /etc/resolv.conf.pre-trustforge 2>/dev/null || true
+    fi
+    rm -f /etc/resolv.conf
+    printf 'nameserver 127.0.0.1\n' >/etc/resolv.conf
+    chmod 0644 /etc/resolv.conf
+    ok "pointed /etc/resolv.conf at local TrustForge DNS (127.0.0.1)"
+}
+
+stage_support_files() {
+    local root=$REPO_ROOT
+    [[ $INSTALL_MODE == package-file ]] && root=$PKG_ROOT
+
+    install -d -m 0755 -o root -g root \
+        "$APP_ROOT/deploy/bare-metal" \
+        "$APP_ROOT/deploy/bare-metal/keycloak" \
+        "$APP_ROOT/remote-helper" \
+        "$APP_ROOT/docs"
+
+    local f
+    for f in install.sh common.sh setup-step-ca.sh setup-oidc.sh setup-acme-dns.sh \
+             install-target-helper.sh setup-nginx-tls.sh; do
+        if [[ -f $DEPLOY_DIR/$f ]]; then
+            install -m 0755 -o root -g root "$DEPLOY_DIR/$f" "$APP_ROOT/deploy/bare-metal/$f"
+        fi
+    done
+    for f in trustforge.service trustforge.env.example; do
+        if [[ -f $DEPLOY_DIR/$f ]]; then
+            install -m 0644 -o root -g root "$DEPLOY_DIR/$f" "$APP_ROOT/deploy/bare-metal/$f"
+        fi
+    done
+
+    local realm_src=""
+    if [[ -f $DEPLOY_DIR/keycloak/trustforge-dev-realm.json ]]; then
+        realm_src=$DEPLOY_DIR/keycloak/trustforge-dev-realm.json
+    elif [[ -f $root/TrustForge.Api/keycloak/trustforge-dev-realm.json ]]; then
+        realm_src=$root/TrustForge.Api/keycloak/trustforge-dev-realm.json
+    fi
+    if [[ -n $realm_src ]]; then
+        install -m 0644 -o root -g root "$realm_src" "$APP_ROOT/deploy/bare-metal/keycloak/trustforge-dev-realm.json"
+    fi
+
+    if [[ -f $root/remote-helper/trustforge-certctl ]]; then
+        install -m 0755 -o root -g root "$root/remote-helper/trustforge-certctl" "$APP_ROOT/remote-helper/trustforge-certctl"
+    fi
+    if [[ -f $root/remote-helper/README.md ]]; then
+        install -m 0644 -o root -g root "$root/remote-helper/README.md" "$APP_ROOT/remote-helper/README.md"
+    fi
+
+    local doc_src=""
+    if [[ -d $root/docs && -f $root/docs/BAREMETAL.md ]]; then
+        doc_src=$root/docs
+    else
+        doc_src=$root
+    fi
+    for f in BAREMETAL.md BARE-METAL-GUIDE.md DEPLOYMENT.md OPERATIONS.md README.md SECURITY.md build.md CHANGELOG.md LICENSE; do
+        if [[ -f $doc_src/$f ]]; then
+            install -m 0644 -o root -g root "$doc_src/$f" "$APP_ROOT/docs/$f"
+        elif [[ -f $root/docs/$f ]]; then
+            install -m 0644 -o root -g root "$root/docs/$f" "$APP_ROOT/docs/$f"
+        fi
+    done
+    if [[ -f $APP_ROOT/docs/BAREMETAL.md ]]; then
+        ln -sfn "$APP_ROOT/docs/BAREMETAL.md" "$APP_ROOT/BAREMETAL.md"
+    fi
+    ok "staged operational scripts, remote-helper, and docs under $APP_ROOT"
+}
+
+run_post_install_stack() {
+    local host_ip
+    host_ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}' || true)
+    [[ -n $host_ip ]] || host_ip="127.0.0.1"
+
+    if [[ $WITH_STEP_CA -eq 1 ]]; then
+        local -a ca_args=(--ca-domain "$CA_DOMAIN")
+        [[ $USE_APT_STEP_CA -eq 1 ]] && ca_args+=(--use-apt-step-ca)
+        bash "$APP_ROOT/deploy/bare-metal/setup-step-ca.sh" "${ca_args[@]}"
+    fi
+
+    if [[ $WITH_ACME_DNS -eq 1 ]]; then
+        local -a dns_args=(
+            --zone "$SETUP_ZONE"
+            --account-email "$ADMIN_EMAIL"
+            --record "${CA_DOMAIN}=${host_ip}"
+            --record "${API_DOMAIN}=${host_ip}"
+        )
+        [[ $WITH_LOCAL_OIDC -eq 1 ]] && dns_args+=(--record "${OIDC_DOMAIN}=${host_ip}")
+        bash "$APP_ROOT/deploy/bare-metal/setup-acme-dns.sh" "${dns_args[@]}"
+    fi
+
+    if [[ $WITH_LOCAL_OIDC -eq 1 ]]; then
+        bash "$APP_ROOT/deploy/bare-metal/setup-oidc.sh" \
+            --domain "$OIDC_DOMAIN" \
+            --issuer-url "$OIDC_AUTHORITY" \
+            --audience "$OIDC_AUDIENCE" \
+            --admin-email "$ADMIN_EMAIL"
+    fi
+
+    if [[ $WITH_SELF_TLS -eq 1 ]]; then
+        bash "$APP_ROOT/deploy/bare-metal/install-target-helper.sh" \
+            --local --control-plane-secret ssh-local.json \
+            --helper-path "$APP_ROOT/remote-helper/trustforge-certctl"
+        local -a nginx_args=(--api-domain "$API_DOMAIN")
+        [[ $WITH_LOCAL_OIDC -eq 1 ]] && nginx_args+=(--oidc-domain "$OIDC_DOMAIN")
+        bash "$APP_ROOT/deploy/bare-metal/setup-nginx-tls.sh" "${nginx_args[@]}"
+    fi
+}
+
 main() {
     parse_args "$@"
 
@@ -1123,6 +1310,16 @@ main() {
     if [[ -n $VALIDATE_PACKAGE ]]; then
         validate_package_entry "$VALIDATE_PACKAGE"
         return $?
+    fi
+
+    [[ -n $API_DOMAIN ]] || API_DOMAIN="api.${SETUP_ZONE}"
+    [[ -n $CA_DOMAIN ]] || CA_DOMAIN="ca.${SETUP_ZONE}"
+    [[ -n $OIDC_DOMAIN ]] || OIDC_DOMAIN="id.${SETUP_ZONE}"
+    [[ -n $ADMIN_EMAIL ]] || ADMIN_EMAIL="ops@${SETUP_ZONE}"
+
+    if [[ $WITH_LOCAL_OIDC -eq 1 ]]; then
+        [[ -n $OIDC_AUTHORITY ]] || OIDC_AUTHORITY="https://${OIDC_DOMAIN}/realms/trustforge-dev"
+        [[ -n $OIDC_AUDIENCE ]] || OIDC_AUDIENCE="trustforge-api"
     fi
 
     select_install_mode
@@ -1136,7 +1333,7 @@ main() {
         # pipe) an empty reply would loop here forever instead of saying what to pass.
         while [[ -z $OIDC_AUTHORITY ]]; do
             printf 'HTTPS OIDC issuer URL: ' >/dev/tty ||
-                die "no terminal to ask for the OIDC issuer on: pass --oidc-authority URL."
+                die "no terminal to ask for the OIDC issuer on: pass --oidc-authority URL (or --with-local-oidc)."
             IFS= read -r OIDC_AUTHORITY </dev/tty || OIDC_AUTHORITY=
         done
         while [[ -z $OIDC_AUDIENCE ]]; do
@@ -1187,6 +1384,7 @@ main() {
     else
         stage_package_release "$release_id"
     fi
+    stage_support_files
     create_service_account
     create_directories
 
@@ -1214,13 +1412,20 @@ main() {
     generate_env_file "$dns_admin_password"
     provision_postgres
     run_migrations
+    free_port_53_stub
     install_unit
     verify_runtime
+    switch_host_resolver_to_local
     write_state "$release_id"
     prune_releases
 
-    log "TrustForge is running. DNS console 127.0.0.1:$DNS_UI_PORT, API 127.0.0.1:$API_PORT (put TLS in front)."
-    log "Work through the smoke checklist in BAREMETAL.md before trusting this host, especially the reboot step."
+    run_post_install_stack
+
+    log "TrustForge is running. DNS console 127.0.0.1:$DNS_UI_PORT, API 127.0.0.1:$API_PORT."
+    if [[ $WITH_SELF_TLS -eq 1 ]]; then
+        log "HTTPS API endpoint: https://${API_DOMAIN} (auto-renewing via TrustForge)."
+    fi
+    log "See $APP_ROOT/docs/BARE-METAL-GUIDE.md and BAREMETAL.md for operations and verification."
 }
 
 main "$@"

@@ -1,0 +1,56 @@
+version: '3.8'
+
+services:
+  # Bare-metal deployment verification service
+  trustforge-verify:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+      target: test
+    container_name: trustforge-verify
+    environment:
+      - DEBIAN_FRONTEND=noninteractive
+    volumes:
+      - .:/workspace:ro
+      - /tmp/trustforge-verify:/tmp
+    working_dir: /opt/trustforge
+    command: ["full-test"]
+    # Remove network isolation for testing
+    network_mode: host
+    # Keep container running for debugging
+    stdin_open: true
+    tty: true
+
+  # PostgreSQL test database (optional, for integration testing)
+  postgres:
+    image: postgres:17
+    container_name: trustforge-postgres
+    environment:
+      POSTGRES_DB: trustforge
+      POSTGRES_USER: trustforge
+      POSTGRES_PASSWORD: test-password-change-me
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - trustforge-net
+
+  # Technitium DNS test server (optional, for DNS testing)
+  # Note: This is a minimal example; full Technitium deployment requires more config
+  # technitium:
+  #   image: technitiumdns/dns-server:latest
+  #   container_name: trustforge-technitium
+  #   ports:
+  #     - "5380:5380"
+  #     - "53:53/udp"
+  #     - "53:53/tcp"
+  #   networks:
+  #     - trustforge-net
+
+networks:
+  trustforge-net:
+    driver: bridge
+
+volumes:
+  postgres-data:

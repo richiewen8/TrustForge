@@ -1,0 +1,70 @@
+# Multi-stage Dockerfile for TrustForge bare-metal deployment verification
+# Build stage: compile application
+# Test stage: verify deployment scripts in isolated Ubuntu 24.04 environment
+
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+WORKDIR /src
+COPY . .
+RUN dotnet restore TrustForge.sln
+RUN dotnet publish TrustForge.Api/TrustForge.Api.csproj \
+	-c Release \
+	-o /app/publish \
+	--no-self-contained
+
+# Test stage: verify deployment in Ubuntu 24.04
+FROM ubuntu:24.04 AS test
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install minimal dependencies for testing
+RUN apt-get update && apt-get install -y --no-install-recommends \
+	bash \
+	curl \
+	wget \
+	git \
+	jq \
+	shellcheck \
+	postgresql-client \
+	openssh-client \
+	openssl \
+	sudo \
+	coreutils \
+	grep \
+	&& rm -rf /var/lib/apt/lists/*
+
+# Create directory structure
+RUN mkdir -p /opt/trustforge/app/current \
+	&& mkdir -p /opt/trustforge/deploy/bare-metal \
+	&& mkdir -p /opt/trustforge/remote-helper \
+	&& mkdir -p /opt/trustforge/scripts
+
+# Copy application files
+COPY --from=build /app/publish /opt/trustforge/app/current
+
+# Copy deployment scripts
+COPY deploy/bare-metal /opt/trustforge/deploy/bare-metal
+
+# Copy remote-helper files
+COPY remote-helper /opt/trustforge/remote-helper
+
+# Copy documentation
+COPY docs /opt/trustforge/docs
+
+# Copy CI workflow for reference
+COPY .github/workflows/linux-release.yml /opt/trustforge/.github-workflows-linux-release.yml
+
+# Create trustforge user
+RUN useradd -r -s /bin/bash -d /opt/trustforge trustforge || true && \
+	chown -R trustforge:trustforge /opt/trustforge
+
+# Set working directory
+WORKDIR /opt/trustforge
+
+# Copy and setup entrypoint
+COPY scripts/docker-test-entrypoint.sh /usr/local/bin/test-entrypoint.sh
+RUN chmod +x /usr/local/bin/test-entrypoint.sh
+
+# Verify bash is available
+RUN bash --version | head -n 1
+
+ENTRYPOINT ["/usr/local/bin/test-entrypoint.sh"]
+CMD ["full-test"]

@@ -1,7 +1,7 @@
 [Unit]
 Description=TrustForge certificate platform (API with embedded DNS engine)
-Documentation=file:/opt/trustforge/BAREMETAL.md
 Documentation=https://github.com/TrustForge/TrustForge/blob/master/DEPLOYMENT.md
+Documentation=https://github.com/TrustForge/TrustForge/blob/master/BAREMETAL.md
 After=network-online.target postgresql@17-main.service
 Wants=network-online.target
 # postgresql@17-main.service is ordered above but not Wanted: with --skip-postgres the database is

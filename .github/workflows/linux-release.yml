@@ -221,16 +221,38 @@ jobs:
           scripts=(
             TrustForge/deploy/bare-metal/install.sh
             TrustForge/deploy/bare-metal/build-and-verify-in-container.sh
+            TrustForge/deploy/bare-metal/init-dns.sh
+            TrustForge/deploy/bare-metal/init-certctl.sh
+            TrustForge/deploy/bare-metal/init-nginx.sh
+            TrustForge/deploy/bare-metal/init-step-ca.sh
+            TrustForge/deploy/bare-metal/init-oidc.sh
             TrustForge/deploy/release/make-package.sh
             "$TF_UNPACKED/deploy/bare-metal/install.sh"
+          )
+          # Verify packaged scripts
+          packaged_scripts=(
+            "$TF_UNPACKED/deploy/bare-metal/init-dns.sh"
+            "$TF_UNPACKED/deploy/bare-metal/init-certctl.sh"
+            "$TF_UNPACKED/deploy/bare-metal/init-nginx.sh"
+            "$TF_UNPACKED/deploy/bare-metal/init-step-ca.sh"
+            "$TF_UNPACKED/deploy/bare-metal/init-oidc.sh"
           )
           # What the operator reads in the repository is what the release makes them run.
           diff -q TrustForge/deploy/bare-metal/install.sh "$TF_UNPACKED/deploy/bare-metal/install.sh" ||
             { echo "::error::the packaged installer differs from the one in this commit"; exit 1; }
+          # Verify remote-helper components are packaged
+          [[ -f "$TF_UNPACKED/remote-helper/trustforge-certctl" ]] ||
+            { echo "::error::trustforge-certctl binary missing from package"; exit 1; }
+          [[ -f "$TF_UNPACKED/remote-helper/README.md" ]] ||
+            { echo "::error::remote-helper README.md missing from package"; exit 1; }
           for s in "${scripts[@]}"; do
             [[ -f $s ]] || { echo "::error::expected script is missing: $s"; exit 1; }
             bash -n "$s"
             shellcheck -S style "$s"
+          done
+          for s in "${packaged_scripts[@]}"; do
+            [[ -f $s ]] || { echo "::error::expected packaged script is missing: $s"; exit 1; }
+            [[ -x $s ]] || { echo "::error::packaged script is not executable: $s"; exit 1; }
           done
           [[ -x "$TF_UNPACKED/deploy/bare-metal/install.sh" ]] ||
             { echo "::error::the packaged installer lost its exec bit"; exit 1; }
